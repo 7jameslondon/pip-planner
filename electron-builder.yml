@@ -1,0 +1,22 @@
+appId: com.pipplanner.app
+productName: PIP Planner
+copyright: Copyright © 2026 PIP Planner contributors
+asar: true
+
+directories:
+  output: release
+
+files:
+  - electron/**/*
+  - package.json
+
+extraResources:
+  - from: dist/backend/pip-planner-web
+    to: backend/pip-planner-web
+
+win:
+  target:
+    - target: portable
+      arch:
+        - x64
+  artifactName: "${productName}-${version}-${arch}.${ext}"

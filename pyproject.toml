@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pip-planner"
+version = "0.1.0"
+description = "Design pyrrole-imidazole polyamide candidates from DNA sequences."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "PIP Planner contributors" }]
+dependencies = ["rdkit>=2026.3.3"]
+
+[project.scripts]
+pip-planner = "pip_planner.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["pip_planner*"]
