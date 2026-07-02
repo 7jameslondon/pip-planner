@@ -13,6 +13,7 @@
     "build:desktop": "python scripts\\build_desktop.py",
     "test:electron-server": "python scripts\\run_electron_server_harness.py",
     "test:electron-smoke": "python scripts\\run_electron_smoke_harness.py",
+    "test:splash-timing": "python scripts\\run_splash_timing_harness.py",
     "test:packaged": "python scripts\\run_packaged_smoke_harness.py"
   },
   "devDependencies": {

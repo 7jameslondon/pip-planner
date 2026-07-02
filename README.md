@@ -97,10 +97,12 @@ The build workflow does two things:
 - `python scripts/build_backend.py` bundles the Python/RDKit server into `dist/backend/pip-planner-web/pip-planner-web.exe`.
 - `python scripts/build_desktop.py` packages Electron and the backend into `release/`.
 
-Each build is copied into a timestamped folder under `release/`, and `release/LATEST.txt` points to the newest one. The main files to run after a successful build are:
+Each build is copied into a timestamped folder under `release/`, and `release/LATEST.txt` points to the newest one. The build produces a single-file portable executable plus an unpacked development copy:
 
-- `release/build-YYYYMMDD-HHMMSS/PIP Planner-0.1.0-x64.exe`: portable single-file executable.
-- `release/build-YYYYMMDD-HHMMSS/win-unpacked/PIP Planner.exe`: unpacked executable, useful for smoke testing and debugging.
+- `release/build-YYYYMMDD-HHMMSS/PIP Planner.exe`: single-file portable executable. It contains the native splash and an embedded Electron app payload, so it can be copied and run by itself. The splash target is under 0.5 seconds.
+- `release/build-YYYYMMDD-HHMMSS/win-unpacked/PIP Planner.exe`: direct Electron executable, useful for development and debugging.
+
+On first launch, the portable executable shows the native splash first, then extracts its embedded app payload to a per-build cache under the user profile and opens the real UI. Later launches reuse that cache. The `win-unpacked` folder is kept only so development smoke tests and debugging can run the Electron app directly.
 
 Build outputs are generated artifacts and are ignored by git.
 
@@ -161,6 +163,12 @@ Run the native Electron smoke harness:
 
 ```powershell
 pnpm test:electron-smoke
+```
+
+Run the splash startup timing harness:
+
+```powershell
+pnpm test:splash-timing
 ```
 
 After building, test the packaged executable:

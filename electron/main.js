@@ -1,14 +1,22 @@
+const { performance } = require('node:perf_hooks');
+const startupStart = performance.now();
+
 const { app, BrowserWindow, dialog, shell } = require('electron');
 const fs = require('fs');
 const path = require('path');
-const { startPlannerServer, stopPlannerServer } = require('./server');
 
 const appIconPath = path.join(__dirname, '..', 'assets', 'icons', 'icon.ico');
 let mainWindow = null;
 let splashWindow = null;
+let splashLoadPromise = null;
 let server = null;
+let serverModule = null;
 let startupPromise = null;
 const isSmokeRun = process.env.PIP_PLANNER_ELECTRON_SMOKE === '1';
+const startupTimingFile = process.env.PIP_PLANNER_STARTUP_TIMING_FILE || '';
+const startupTimingStdout = process.env.PIP_PLANNER_STARTUP_TIMING_STDOUT === '1';
+const splashMode = process.env.PIP_PLANNER_SPLASH_MODE || 'no-icon';
+const splashModeFlags = new Set(splashMode.split(/[,+]/).map(flag => flag.trim()).filter(Boolean));
 
 const SPLASH_HTML = `<!doctype html>
 <html>
@@ -128,9 +136,47 @@ async function createWindow() {
   return startupPromise;
 }
 
-function createSplashWindow() {
-  if (splashWindow && !splashWindow.isDestroyed()) return;
+function serverApi() {
+  if (!serverModule) {
+    serverModule = require('./server');
+  }
+  return serverModule;
+}
 
+function recordStartupEvent(name) {
+  const elapsedMs = performance.now() - startupStart;
+  if (startupTimingStdout) {
+    console.log(`electron-timing-${name}-ms=${elapsedMs.toFixed(1)}`);
+  }
+  if (!startupTimingFile) return;
+
+  const event = {
+    event: name,
+    elapsed_ms: Number(elapsedMs.toFixed(3)),
+    pid: process.pid,
+    mode: splashMode,
+    packaged: app.isPackaged
+  };
+  try {
+    const line = `${JSON.stringify(event)}\n`;
+    if (name === 'splash-did-finish-load' || name === 'splash-did-fail-load' || name === 'ui-smoke-loaded') {
+      fs.appendFileSync(startupTimingFile, line, 'utf-8');
+    } else {
+      fs.appendFile(startupTimingFile, line, () => {});
+    }
+  } catch (_error) {
+    // Timing output must never interfere with launching the app.
+  }
+}
+
+function createSplashWindow() {
+  if (splashWindow && !splashWindow.isDestroyed()) {
+    return splashLoadPromise || Promise.resolve();
+  }
+
+  recordStartupEvent('splash-create-start');
+  const useSplashIcon = !splashModeFlags.has('fast') && !splashModeFlags.has('no-icon');
+  const useSplashSandbox = !splashModeFlags.has('fast') && !splashModeFlags.has('no-sandbox');
   splashWindow = new BrowserWindow({
     width: 420,
     height: 260,
@@ -141,28 +187,45 @@ function createSplashWindow() {
     center: true,
     show: true,
     title: 'PIP Planner',
-    icon: appIconPath,
+    ...(useSplashIcon ? { icon: appIconPath } : {}),
     backgroundColor: '#ffffff',
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: true
+      sandbox: useSplashSandbox
     }
   });
+  recordStartupEvent('splash-window-created');
 
   splashWindow.on('closed', () => {
     splashWindow = null;
+    splashLoadPromise = null;
+  });
+  splashWindow.once('ready-to-show', () => recordStartupEvent('splash-ready-to-show'));
+  splashWindow.webContents.once('dom-ready', () => recordStartupEvent('splash-dom-ready'));
+  splashLoadPromise = new Promise(resolve => {
+    splashWindow.webContents.once('did-finish-load', () => {
+      recordStartupEvent('splash-did-finish-load');
+      resolve();
+    });
+    splashWindow.webContents.once('did-fail-load', () => {
+      recordStartupEvent('splash-did-fail-load');
+      resolve();
+    });
   });
 
   splashWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(SPLASH_HTML)}`);
+  recordStartupEvent('splash-load-requested');
   if (isSmokeRun) {
     console.log('electron-splash-created=true');
   }
+  return splashLoadPromise;
 }
 
 async function createWindowAfterSplash() {
-  createSplashWindow();
+  await createSplashWindow();
 
+  const { startPlannerServer } = serverApi();
   server = await startPlannerServer({
     outDir: app.isPackaged
       ? path.join(app.getPath('userData'), 'generated')
@@ -215,6 +278,9 @@ async function createWindowAfterSplash() {
         check();
       })`
     );
+    if (loaded) {
+      recordStartupEvent('ui-smoke-loaded');
+    }
     console.log(`electron-smoke-loaded=${loaded}`);
     if (!loaded) process.exitCode = 1;
     app.quit();
@@ -222,6 +288,7 @@ async function createWindowAfterSplash() {
 }
 
 app.whenReady().then(() => {
+  recordStartupEvent('app-ready');
   createWindow().catch(error => {
     dialog.showErrorBox('PIP Planner failed to start', error.stack || error.message);
     if (splashWindow && !splashWindow.isDestroyed()) {
@@ -244,7 +311,7 @@ app.on('activate', () => {
 
 app.on('before-quit', () => {
   if (server) {
-    stopPlannerServer(server.child);
+    serverApi().stopPlannerServer(server.child);
     server = null;
   }
 });
