@@ -40,6 +40,8 @@ def main() -> int:
         "--win",
         "portable",
         "--x64",
+        "--publish",
+        "never",
         "--config",
         str(ROOT / "electron-builder.yml"),
         f"-c.directories.output={TEMP_RELEASE_DIR}",

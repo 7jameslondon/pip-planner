@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import importlib.util
 import shutil
 import subprocess
 import sys
@@ -46,6 +47,7 @@ def main() -> int:
         "numpy",
         "--collect-all",
         "PIL",
+        *_optional_package_args(),
         "--hidden-import",
         "pip_planner.web",
         "--noupx",
@@ -63,6 +65,16 @@ def main() -> int:
 
     print(f"Built backend executable: {executable}")
     return 0
+
+
+def _optional_package_args() -> list[str]:
+    args: list[str] = []
+    for package_name in ("admet_ai", "soltrannet"):
+        if importlib.util.find_spec(package_name) is None:
+            continue
+        print(f"Including optional solubility package in backend build: {package_name}")
+        args.extend(["--collect-all", package_name])
+    return args
 
 
 def _remove_within_workspace(path: Path) -> None:

@@ -15,6 +15,14 @@ Chemical SVG rendering uses [RDKit](https://www.rdkit.org/):
 python -m pip install rdkit
 ```
 
+Optional aqueous solubility estimates use ADMET-AI v2 and SolTranNet when those packages are installed locally:
+
+```powershell
+python -m pip install ".[solubility]"
+```
+
+If they are not installed, the CLI and UI still run and report each predictor as unavailable. These model outputs are planning estimates for the RDKit-generated SMILES, not experimentally validated PIP solubility.
+
 ## Recognition Code
 
 Input DNA is read as the 5' to 3' target strand. The default A/T mode uses Hp to distinguish A-T from T-A:

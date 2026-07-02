@@ -42,12 +42,24 @@ class CliTests(unittest.TestCase):
             self.assertTrue(chemical.exists())
             self.assertTrue(schematic.exists())
             self.assertTrue(design_json.exists())
-            self.assertIn("<svg", chemical.read_text(encoding="utf-8"))
-            self.assertIn("data-renderer=\"RDKit\"", chemical.read_text(encoding="utf-8"))
-            self.assertIn("PIP schematic", schematic.read_text(encoding="utf-8"))
+            chemical_svg = chemical.read_text(encoding="utf-8")
+            self.assertIn("<svg", chemical_svg)
+            self.assertIn("data-renderer=\"RDKit\"", chemical_svg)
+            self.assertNotIn("#FF0000", chemical_svg)
+            self.assertNotIn("#0000FF", chemical_svg)
+            self.assertNotIn("stroke:#FF0000", chemical_svg)
+            self.assertNotIn("stroke:#0000FF", chemical_svg)
+            schematic_svg = schematic.read_text(encoding="utf-8")
+            self.assertIn("PIP schematic", schematic_svg)
+            self.assertIn('data-schematic="polyamide-figure"', schematic_svg)
+            self.assertIn('class="monomer im-symbol"', schematic_svg)
+            self.assertIn('class="monomer py-symbol"', schematic_svg)
+            self.assertIn('class="monomer hp-symbol"', schematic_svg)
             self.assertTrue(payload["chemical_renderer"].startswith("RDKit "))
             self.assertIn("chemical_smiles", payload)
             self.assertIn("C(=O)", payload["chemical_smiles"])
+            solubility_methods = {prediction["method"] for prediction in payload["solubility_predictions"]}
+            self.assertEqual(solubility_methods, {"ADMET-AI v2", "SolTranNet"})
 
     def test_cli_rejects_invalid_sequence(self) -> None:
         completed = subprocess.run(

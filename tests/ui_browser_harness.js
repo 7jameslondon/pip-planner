@@ -31,13 +31,23 @@ async function main() {
     await page.goto(baseUrl, { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('#preview svg', { timeout: 10000 });
 
-    await page.fill('#sequence', 'ATGC');
+    await page.fill('#sequence', 'axt gc123');
+    const sanitizedSequence = await page.locator('#sequence').inputValue();
+    if (sanitizedSequence !== 'ATGC') {
+      throw new Error(`Expected DNA input to sanitize to ATGC, saw: ${sanitizedSequence}`);
+    }
     await page.locator('label').filter({ hasText: 'Linear' }).click();
     await page.selectOption('#at-mode', 'py-py');
     await page.selectOption('#tail', 'none');
     await page.waitForFunction(() => {
       const chain = document.querySelector('#metric-chain');
       return chain && chain.textContent.includes('Py-Py-Im-Py');
+    }, null, { timeout: 10000 });
+    await page.waitForFunction(() => {
+      const solubility = document.querySelector('#metric-solubility');
+      return solubility &&
+        solubility.textContent.includes('ADMET-AI v2') &&
+        solubility.textContent.includes('SolTranNet');
     }, null, { timeout: 10000 });
 
     const chemicalRenderer = await page.locator('#preview svg').getAttribute('data-renderer');

@@ -60,6 +60,8 @@ class WebApiTests(unittest.TestCase):
                 self.assertIn("data-renderer=\"RDKit\"", result["chemical_svg"])
                 self.assertIn("Py-Py-Im-Py", result["design"]["chain_code"])
                 self.assertTrue(result["design"]["chemical_renderer"].startswith("RDKit "))
+                solubility_methods = {prediction["method"] for prediction in result["design"]["solubility_predictions"]}
+                self.assertEqual(solubility_methods, {"ADMET-AI v2", "SolTranNet"})
 
                 with request.urlopen(
                     f"http://127.0.0.1:{port}{result['generated']['chemical_svg_url']}",

@@ -133,6 +133,9 @@ def _format_text_summary(payload: dict) -> str:
     rows.extend(
         [
             "",
+            "Solubility predictions:",
+            *_format_solubility_rows(payload.get("solubility_predictions", [])),
+            "",
             f"Schematic SVG: {payload['files']['schematic_svg']}",
             f"Chemical SVG:  {payload['files']['chemical_svg']}",
             f"Design JSON:   {payload['files']['json']}",
@@ -146,3 +149,23 @@ def _format_text_summary(payload: dict) -> str:
             rows.append(f"  - {warning}")
 
     return "\n".join(rows)
+
+
+def _format_solubility_rows(predictions: list[dict]) -> list[str]:
+    if not predictions:
+        return ["  - No solubility predictors were run."]
+
+    rows = []
+    for prediction in predictions:
+        method = str(prediction.get("method") or "Unknown predictor")
+        status = str(prediction.get("status") or "unknown")
+        if status == "ok":
+            value = prediction.get("value")
+            unit = prediction.get("unit") or "predicted logS"
+            property_name = prediction.get("property_name")
+            detail = f" ({property_name})" if property_name else ""
+            rows.append(f"  - {method}: {float(value):.3g} {unit}{detail}")
+        else:
+            message = prediction.get("message") or status
+            rows.append(f"  - {method}: {status} - {message}")
+    return rows

@@ -8,6 +8,7 @@ directories:
 
 files:
   - electron/**/*
+  - assets/icons/**/*
   - package.json
 
 extraResources:
@@ -15,6 +16,7 @@ extraResources:
     to: backend/pip-planner-web
 
 win:
+  icon: assets/icons/icon.ico
   target:
     - target: portable
       arch:

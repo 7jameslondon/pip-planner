@@ -163,7 +163,9 @@ HTML_PAGE = """<!doctype html>
       font-family: Consolas, 'Liberation Mono', monospace;
       font-size: 14px;
       line-height: 1.35;
+      white-space: pre-line;
     }
+    .metric.solubility { grid-column: 1 / -1; }
     .toolbar {
       display: flex;
       flex-wrap: wrap;
@@ -263,7 +265,7 @@ HTML_PAGE = """<!doctype html>
 
       <form id="design-form">
         <label for="sequence">DNA sequence</label>
-        <textarea id="sequence" name="sequence" spellcheck="false" autocomplete="off">GTAC</textarea>
+        <textarea id="sequence" name="sequence" spellcheck="false" autocomplete="off" autocapitalize="characters" autocorrect="off">GTAC</textarea>
 
         <label>Architecture</label>
         <div class="segmented" role="radiogroup" aria-label="Polyamide architecture">
@@ -308,6 +310,7 @@ HTML_PAGE = """<!doctype html>
         <div class="metric"><span>Complement</span><strong id="metric-complement">-</strong></div>
         <div class="metric"><span>Pairs</span><strong id="metric-pairs">-</strong></div>
         <div class="metric"><span>Chain</span><strong id="metric-chain">-</strong></div>
+        <div class="metric solubility"><span>Solubility</span><strong id="metric-solubility">-</strong></div>
       </section>
 
       <div class="toolbar">
@@ -326,6 +329,7 @@ HTML_PAGE = """<!doctype html>
 
   <script>
     const form = document.querySelector('#design-form');
+    const sequenceInput = document.querySelector('#sequence');
     const submit = document.querySelector('#submit');
     const preview = document.querySelector('#preview');
     const warnings = document.querySelector('#warnings');
@@ -348,9 +352,40 @@ HTML_PAGE = """<!doctype html>
       };
     }
 
+    function sanitizeDnaSequence(rawValue) {
+      return rawValue.toUpperCase().replace(/[^AGTC]/g, '');
+    }
+
+    function sanitizeSequenceInput() {
+      const rawValue = sequenceInput.value;
+      const selectionStart = sequenceInput.selectionStart ?? rawValue.length;
+      const sanitizedValue = sanitizeDnaSequence(rawValue);
+      if (sanitizedValue === rawValue) return;
+
+      const sanitizedPrefix = sanitizeDnaSequence(rawValue.slice(0, selectionStart));
+      sequenceInput.value = sanitizedValue;
+      sequenceInput.setSelectionRange(sanitizedPrefix.length, sanitizedPrefix.length);
+    }
+
     function showMessage(element, text) {
       element.textContent = text || '';
       element.classList.toggle('is-visible', Boolean(text));
+    }
+
+    function formatSolubility(predictions) {
+      if (!Array.isArray(predictions) || predictions.length === 0) return '-';
+      return predictions.map(prediction => {
+        const method = prediction.method || 'Unknown predictor';
+        if (prediction.status === 'ok' && Number.isFinite(Number(prediction.value))) {
+          const value = Number(prediction.value).toPrecision(3);
+          const unit = prediction.unit || 'predicted logS';
+          const propertyName = prediction.property_name ? ' (' + prediction.property_name + ')' : '';
+          return method + ': ' + value + ' ' + unit + propertyName;
+        }
+        const status = prediction.status || 'unknown';
+        const message = prediction.message ? ' - ' + prediction.message : '';
+        return method + ': ' + status + message;
+      }).join('\\n');
     }
 
     function renderResult(result) {
@@ -360,6 +395,7 @@ HTML_PAGE = """<!doctype html>
       document.querySelector('#metric-complement').textContent = design.complement_label;
       document.querySelector('#metric-pairs').textContent = design.recognition_pairs.join(' ');
       document.querySelector('#metric-chain').textContent = design.chain_code;
+      document.querySelector('#metric-solubility').textContent = formatSolubility(design.solubility_predictions);
       showMessage(warnings, design.warnings.join(' '));
       showMessage(errors, '');
 
@@ -432,6 +468,7 @@ HTML_PAGE = """<!doctype html>
         renderPreview();
       });
     });
+    sequenceInput.addEventListener('input', sanitizeSequenceInput);
     form.addEventListener('submit', design);
     form.addEventListener('input', () => scheduleDesign());
     form.addEventListener('change', () => scheduleDesign(0));

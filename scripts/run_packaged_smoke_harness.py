@@ -18,7 +18,15 @@ def main() -> int:
     env = os.environ.copy()
     env["PIP_PLANNER_ELECTRON_SMOKE"] = "1"
     completed = subprocess.run(
-        [str(executable)],
+        [
+            str(executable),
+            "--disable-gpu",
+            "--disable-gpu-compositing",
+            "--disable-gpu-sandbox",
+            "--disable-software-rasterizer",
+            "--in-process-gpu",
+            "--no-sandbox",
+        ],
         cwd=ROOT,
         env=env,
         text=True,
@@ -33,6 +41,9 @@ def main() -> int:
         print(completed.stderr, end="", file=sys.stderr)
     if completed.returncode != 0:
         return completed.returncode
+    if "electron-splash-created=true" not in completed.stdout:
+        print("Packaged smoke output did not confirm the splash window was created.", file=sys.stderr)
+        return 1
     if "electron-smoke-loaded=true" not in completed.stdout:
         print("Packaged smoke output did not confirm the UI loaded.", file=sys.stderr)
         return 1
