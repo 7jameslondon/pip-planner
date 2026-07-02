@@ -30,6 +30,11 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(design.chain_code, "Py-Py-Im-Py")
         self.assertTrue(any("Linear mode" in warning for warning in design.warnings))
 
+    def test_hairpin_does_not_warn_about_short_recognition_sites(self) -> None:
+        design = design_polyamide("ATGCAT")
+
+        self.assertFalse(any("short recognition sites" in warning for warning in design.warnings))
+
     def test_fasta_like_input_is_normalized(self) -> None:
         self.assertEqual(normalize_dna(">target\nG T-A_C\n"), "GTAC")
 

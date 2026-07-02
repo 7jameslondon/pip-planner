@@ -35,25 +35,20 @@ SVG_STYLE = """
 def render_schematic_svg(design: PolyamideDesign) -> str:
     count = len(design.base_pairs)
     gap = _schematic_gap(count)
-    legend_width = 250
-    start_x = legend_width + 96
-    x_last = start_x + max(0, count - 1) * gap
-    width = max(840, int(x_last + 112))
     is_hairpin = design.options.architecture == "hairpin"
-    y_top_dna = 122
-    y_bottom_dna = 294 if is_hairpin else 270
-    figure_bottom = 356 if is_hairpin else 326
-    warning_text = " ".join(design.warnings)
-    warning_lines = _wrap_plain_text(warning_text, max(76, int((width - 68) / 7))) if warning_text else []
-    warning_y = max(figure_bottom + 44, 430)
-    height = max(410, warning_y + 18 * len(warning_lines) + 26)
+    left_bound, right_bound = _schematic_horizontal_bounds(count, gap, is_hairpin, design.options.tail)
+    figure_width = right_bound - left_bound
+    width = max(840, int(figure_width + 96))
+    start_x = (width - figure_width) / 2 - left_bound
+    y_top_dna = 84
+    y_bottom_dna = 256 if is_hairpin else 232
+    figure_bottom = 318 if is_hairpin else 288
+    legend_y = figure_bottom + 54
+    height = max(470, legend_y + 96)
 
     parts = [_svg_header(width, height, f"PIP schematic for {design.sequence}")]
     parts.append(f'<rect class="bg" x="0" y="0" width="{width}" height="{height}"/>')
     parts.append('<g class="figure-schematic" data-schematic="polyamide-figure">')
-    parts.append(_schematic_legend(34, 54))
-    parts.append(_text(start_x, 52, "Sequence", "section-title ink"))
-    parts.append(f'<line class="line" x1="{start_x:.1f}" y1="64.0" x2="{start_x + 170:.1f}" y2="64.0"/>')
     parts.append(_dna_rows(design, start_x, gap, y_top_dna, y_bottom_dna))
 
     if is_hairpin:
@@ -62,17 +57,15 @@ def render_schematic_svg(design: PolyamideDesign) -> str:
         parts.append(_linear_polyamide_symbols(design, start_x, gap, y_top_dna, y_bottom_dna))
 
     parts.append(
-        _text(
-            start_x,
+        _text_center(
+            width / 2,
             figure_bottom,
-            f"{design.options.architecture}; {design.chain_code}; A/T mode: {design.options.at_mode}",
+            f"{design.options.architecture}; {_schematic_chain_code(design)}; A/T mode: {design.options.at_mode}",
             "caption muted",
         )
     )
+    parts.append(_schematic_legend((width - 520) / 2, legend_y))
     parts.append("</g>")
-
-    for index, line in enumerate(warning_lines):
-        parts.append(_text(34, warning_y + index * 18, line, "small muted"))
 
     parts.append("</svg>")
     return "\n".join(parts)
@@ -146,24 +139,47 @@ def _schematic_gap(count: int) -> int:
     return 54
 
 
+def _schematic_horizontal_bounds(count: int, gap: float, is_hairpin: bool, tail: str) -> tuple[float, float]:
+    chain_span = max(0, count - 1) * gap
+    left = min(-86.0, -gap * 0.52 - 44)
+    if is_hairpin:
+        right = max(chain_span + 72, chain_span + gap * 0.50 + 82)
+    else:
+        right = chain_span + gap * (0.82 if tail == "dp" else 0.58) + 72
+    return left, right
+
+
 def _schematic_legend(x: float, y: float) -> str:
     rows = [
-        ("1", "Im", "Im"),
-        ("1", "beta", "beta"),
-        ("1", "Py", "Py"),
-        ("2", "Hp", "Hp"),
+        ("Im", "Im"),
+        ("Py", "Py"),
+        ("β", "beta"),
+        ("Hp", "Hp"),
     ]
     parts = [
+        '<g class="schematic-legend" data-legend="polyamide-symbols">',
         _text(x, y, "Polyamide", "title ink"),
         f'<line class="line" x1="{x:.1f}" y1="{y + 12:.1f}" x2="{x + 200:.1f}" y2="{y + 12:.1f}"/>',
     ]
-    row_y = y + 78
-    for index, (count_text, label, monomer) in enumerate(rows):
-        current_y = row_y + index * 76
-        parts.append(_text(x - 8, current_y + 8, count_text, "section-title ink"))
-        parts.append(_text(x + 62, current_y + 8, f"{label} =", "section-title ink"))
-        parts.append(_monomer_symbol(monomer, x + 184, current_y, 16))
+    row_y = y + 60
+    for index, (label, monomer) in enumerate(rows):
+        current_x = x + index * 132
+        parts.append(_text(current_x, row_y + 8, f"{label} =", "section-title ink"))
+        parts.append(_monomer_symbol(monomer, current_x + 82, row_y, 16))
+    parts.append("</g>")
     return "\n".join(parts)
+
+
+def _schematic_chain_code(design: PolyamideDesign) -> str:
+    return "-".join(_schematic_monomer_label(monomer) for monomer in design.chain_monomers)
+
+
+def _schematic_monomer_label(label: str) -> str:
+    labels = {
+        "gamma-turn": "γ",
+        "beta-turn": "β",
+    }
+    return labels.get(label, label)
 
 
 def _dna_rows(
@@ -204,7 +220,7 @@ def _hairpin_polyamide_symbols(
     x_last = start_x + max(0, len(design.base_pairs) - 1) * gap
     left_stub = start_x - gap * 0.52
     turn_x = x_last + gap * 0.50
-    turn_label = design.options.turn if design.options.turn != "none" else "turn"
+    turn_label = _turn_symbol(design.options.turn)
     parts = [
         f'<line class="polyamide-backbone" x1="{left_stub:.1f}" y1="{top_y:.1f}" x2="{turn_x:.1f}" y2="{top_y:.1f}"/>',
         f'<path class="polyamide-backbone" d="M {turn_x:.1f},{top_y:.1f} C {turn_x + 34:.1f},{top_y:.1f} {turn_x + 34:.1f},{bottom_y:.1f} {turn_x:.1f},{bottom_y:.1f}"/>',
@@ -220,6 +236,15 @@ def _hairpin_polyamide_symbols(
         parts.append(_monomer_symbol(pair.top_monomer, x, top_y))
         parts.append(_monomer_symbol(pair.bottom_monomer, x, bottom_y))
     return "\n".join(parts)
+
+
+def _turn_symbol(turn: str) -> str:
+    labels = {
+        "gamma": "γ",
+        "beta": "β",
+        "none": "turn",
+    }
+    return labels.get(turn, turn)
 
 
 def _linear_polyamide_symbols(

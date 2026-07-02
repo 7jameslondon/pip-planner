@@ -202,11 +202,6 @@ def design_polyamide(raw_sequence: str, options: DesignOptions | None = None) ->
 def _warnings_for_design(sequence: str, options: DesignOptions) -> tuple[str, ...]:
     warnings: list[str] = []
 
-    if options.architecture == "hairpin" and len(sequence) > 5:
-        warnings.append(
-            "Hairpin PIPs are often designed for short recognition sites; confirm long sites with spacers, tandem motifs, or binding data."
-        )
-
     if len(sequence) > 12:
         warnings.append(
             "This tool generates a design candidate, not an affinity/selectivity prediction. Long targets need experimental validation."
