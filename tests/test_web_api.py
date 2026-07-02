@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -17,6 +18,8 @@ class WebApiTests(unittest.TestCase):
     def test_web_api_calls_cli_and_serves_generated_svg(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             port = _free_port()
+            env = os.environ.copy()
+            env["PIP_PLANNER_GENOME_DIR"] = str(ROOT / "tests" / "fixtures" / "genomes")
             server = subprocess.Popen(
                 [
                     sys.executable,
@@ -30,6 +33,7 @@ class WebApiTests(unittest.TestCase):
                     tmp,
                 ],
                 cwd=ROOT,
+                env=env,
                 text=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -43,6 +47,7 @@ class WebApiTests(unittest.TestCase):
                         "at_mode": "py-py",
                         "tail": "none",
                         "turn": "gamma",
+                        "genome": "human-grch38",
                     }
                 ).encode("utf-8")
                 http_request = request.Request(
@@ -55,6 +60,7 @@ class WebApiTests(unittest.TestCase):
                     result = json.loads(response.read().decode("utf-8"))
 
                 self.assertIn("-m", result["invoked_command"])
+                self.assertIn("--genome", result["invoked_command"])
                 self.assertEqual(result["design"]["architecture"], "linear")
                 self.assertIn("<svg", result["chemical_svg"])
                 self.assertIn("data-renderer=\"RDKit\"", result["chemical_svg"])
@@ -62,6 +68,10 @@ class WebApiTests(unittest.TestCase):
                 self.assertTrue(result["design"]["chemical_renderer"].startswith("RDKit "))
                 solubility_methods = {prediction["method"] for prediction in result["design"]["solubility_predictions"]}
                 self.assertEqual(solubility_methods, {"ADMET-AI v2", "SolTranNet"})
+                self.assertEqual(result["design"]["genome_occurrences"]["total_occurrences"], 2)
+                self.assertEqual(result["design"]["model_3d"]["dna_force_field"], "AMBER DNA.OL24")
+                self.assertIn("model_html_url", result["generated"])
+                self.assertIn("complex_pdb_url", result["generated"])
 
                 with request.urlopen(
                     f"http://127.0.0.1:{port}{result['generated']['chemical_svg_url']}",
@@ -70,6 +80,14 @@ class WebApiTests(unittest.TestCase):
                     self.assertEqual(response.status, 200)
                     self.assertIn("image/svg+xml", response.headers["Content-Type"])
                     self.assertIn(b"<svg", response.read())
+
+                with request.urlopen(
+                    f"http://127.0.0.1:{port}{result['generated']['complex_pdb_url']}",
+                    timeout=10,
+                ) as response:
+                    self.assertEqual(response.status, 200)
+                    self.assertIn("chemical/x-pdb", response.headers["Content-Type"])
+                    self.assertIn(b"PIP PLANNER DNA POLYAMIDE", response.read())
             finally:
                 server.terminate()
                 try:

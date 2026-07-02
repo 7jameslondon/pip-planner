@@ -1,27 +1,26 @@
 # PIP Planner
 
-PIP Planner is a local CLI and web UI for turning a DNA target sequence into a pyrrole-imidazole polyamide design candidate. It writes two SVG files for every design:
+PIP Planner is a local CLI and web UI for turning a DNA target sequence into a pyrrole-imidazole polyamide design candidate. It writes SVG and 3D model files for every design:
 
 - `*-schematic.svg`: a planning schematic with the DNA target, complement, recognition pairs, and chain code.
 - `*-chemical.svg`: an RDKit-generated 2D chemical structure drawing from a molecular graph with Py/Im/Hp monomers, amide linkages, hairpin turns, and terminal groups.
+- `*-complex-model.pdb`: an initial modeled DNA duplex plus polyamide pose.
+- `*-complex-viewer.html`: a standalone local 3D viewer for the modeled complex.
+- `*-md-protocol.md`: MD setup notes and local engine status.
 
 The web UI calls the CLI for every design request. The CLI is the source of truth.
 
 ## Dependency
 
-Chemical SVG rendering uses [RDKit](https://www.rdkit.org/):
+Chemical SVG rendering uses [RDKit](https://www.rdkit.org/), and aqueous solubility estimates use ADMET-AI v2 and SolTranNet. Install the project dependencies with:
 
 ```powershell
-python -m pip install rdkit
+python -m pip install -e .
 ```
 
-Optional aqueous solubility estimates use ADMET-AI v2 and SolTranNet when those packages are installed locally:
+These model outputs are planning estimates for the RDKit-generated SMILES, not experimentally validated PIP solubility.
 
-```powershell
-python -m pip install ".[solubility]"
-```
-
-If they are not installed, the CLI and UI still run and report each predictor as unavailable. These model outputs are planning estimates for the RDKit-generated SMILES, not experimentally validated PIP solubility.
+The 3D complex output is an initial modeled pose and MD setup artifact. It is not a production MD trajectory unless you separately run and validate a supported Amber/OpenMM workflow.
 
 ## Recognition Code
 
@@ -62,6 +61,12 @@ Generate machine-readable JSON:
 python -m pip_planner design GTAC --out output/demo --format json
 ```
 
+Count exact occurrences in a local reference genome:
+
+```powershell
+python -m pip_planner design ATGC --genome human-grch38 --out output/demo --format json
+```
+
 Run the local web UI:
 
 ```powershell
@@ -83,6 +88,88 @@ pnpm desktop
 ```
 
 The Electron desktop app starts the same local Python UI server internally, then opens it in a native window.
+
+For day-to-day development on Windows, use the root development launcher:
+
+```powershell
+pnpm dev:launcher
+```
+
+That creates `PIP Planner Dev.exe` in the project root. Double-click it to run the current source tree through Electron without packaging or rebuilding the app. You only need to regenerate this launcher if the launcher source changes.
+
+## Local Genome Occurrence Search
+
+PIP Planner can count exact occurrences of the input DNA sequence against a real local reference FASTA and, when there are fewer than 100 occurrences, list the matching locations with overlaps from local annotation files. It searches the target sequence and its reverse complement, except palindromic targets are counted once per physical genomic site.
+
+Genome data is not bundled in the executable because human references and annotation tracks are large, and HeLa whole-genome datasets are controlled-access. Put local genome files under `data/genomes` or set `PIP_PLANNER_GENOME_DIR` to another folder.
+
+Default layout:
+
+```text
+data/genomes/
+  human-grch38/
+    genome.fa.gz
+    annotations.gff3.gz
+  hela/
+    genome.fa.gz
+    annotations.gff3.gz
+```
+
+You can also create `data/genomes/genomes.json` to define the selectable genomes:
+
+```json
+{
+  "genomes": [
+    {
+      "id": "human-grch38",
+      "label": "Human GRCh38.p14",
+      "fasta": "human-grch38/genome.fa.gz",
+      "annotations": [
+        "human-grch38/gencode.gff3.gz",
+        "human-grch38/regulatory-elements.bed.gz",
+        "human-grch38/repeats.bed.gz"
+      ]
+    },
+    {
+      "id": "hela",
+      "label": "HeLa local reference",
+      "fasta": "hela/genome.fa.gz",
+      "annotations": ["hela/annotations.gff3.gz"]
+    }
+  ]
+}
+```
+
+Annotations may be GFF3, GTF, BED, or gzipped versions of those formats. Any overlapping annotation record can appear in the location table, so gene annotations, exons, regulatory tracks, repeats, CpG islands, and other DNA feature tracks can be included by adding them to the manifest.
+
+Useful data sources:
+
+- Human GRCh38/hg38 FASTA: UCSC `hg38` bigZips or the GENCODE current human release.
+- Human gene annotations: GENCODE GFF3/GTF for GRCh38.
+- HeLa: provide a local FASTA/assembly that you are authorized to use. NIH dbGaP HeLa genome sequence data is controlled-access.
+
+## 3D Complex And MD Artifacts
+
+Every design also writes a local initial 3D model of a B-DNA duplex and the designed polyamide positioned in the minor groove. The web UI shows this in the `3D model` tab and offers a PDB download.
+
+Generated model files:
+
+```text
+*-complex-model.pdb
+*-complex-model.json
+*-complex-viewer.html
+*-md-protocol.md
+```
+
+The PDB/viewer are useful for planning and visual inspection, but the model is not a validated MD result. The JSON includes `model_3d.md_simulation.status`; it will report `not_run` when Amber/OpenMM tooling is not detected. The protocol notes follow this intended production setup:
+
+- DNA force field: AMBER DNA.OL24.
+- Binder force field: GAFF2 with reviewed Py/Im polyamide atom types, protonation/tautomer state, total charge, and torsions.
+- Charges: RESP-style QM charges or a validated AmberTools GAFF2 charge workflow for final work.
+- Water/ions: OPC or a carefully matched TIP4P-Ew/TIP3P water and ion parameter set.
+- Engine: Amber `pmemd.cuda` preferred; OpenMM or GROMACS are acceptable only with careful AMBER topology conversion.
+- Sampling: multiple independent replicas, hundreds of ns each, ideally microsecond-scale for groove adaptation, pose stability, or selectivity claims.
+- Affinity: use alchemical free energy or restrained PMF/umbrella sampling for quantitative binding. MM-PBSA is only a rough screen.
 
 ## Building The Windows Executable
 
@@ -123,6 +210,8 @@ Useful options:
 - `--at-mode distinguish|py-py`: use Hp for A/T orientation or use Py/Py for degenerate A/T recognition.
 - `--tail dp|none`: include or omit the Dp terminal group.
 - `--turn gamma|beta|none`: label the hairpin turn.
+- `--genome none|human-grch38|hela`: scan a configured local reference genome for exact occurrences.
+- `--genome-location-threshold 100`: list locations only when the occurrence count is below this value.
 - `--format text|json`: choose human-readable output or JSON.
 
 Example:

@@ -18,8 +18,12 @@ class ChemistryLayoutTests(unittest.TestCase):
         bottom_centers = [_center(conf, monomer.ring) for monomer in built.monomers[top_count:]]
 
         self.assertGreater(_average_y(top_centers), _average_y(bottom_centers) + 2.5)
-        self.assertGreater(top_centers[0][0], top_centers[-1][0])
-        self.assertLess(bottom_centers[0][0], bottom_centers[-1][0])
+        self.assertLess(top_centers[0][0], top_centers[-1][0])
+        self.assertGreater(bottom_centers[0][0], bottom_centers[-1][0])
+
+        turn_x = conf.GetAtomPosition(built.turn.in_n).x
+        rightmost_monomer_x = max(point[0] for point in [*top_centers, *bottom_centers])
+        self.assertGreater(turn_x, rightmost_monomer_x)
 
         for bond in built.mol.GetBonds():
             begin = conf.GetAtomPosition(bond.GetBeginAtomIdx())

@@ -21,9 +21,10 @@ class SolubilityTests(unittest.TestCase):
                 test_case.assertTrue(smiles)
                 return {"Solubility_AqSolDB": -1.25}
 
-        def fake_predict(smiles: list[str]):
+        def fake_predict(smiles: list[str], num_workers: int = 1):
             self.assertEqual(smiles, ["CCO"])
-            return iter([-0.75])
+            self.assertEqual(num_workers, 0)
+            return iter([(-0.75, "CCO", "")])
 
         fake_admet_ai.ADMETModel = FakeADMETModel
         fake_soltrannet.predict = fake_predict
@@ -39,6 +40,7 @@ class SolubilityTests(unittest.TestCase):
         self.assertEqual(by_method["ADMET-AI v2"]["property_name"], "Solubility_AqSolDB")
         self.assertEqual(by_method["SolTranNet"]["status"], "ok")
         self.assertEqual(by_method["SolTranNet"]["value"], -0.75)
+        self.assertEqual(by_method["SolTranNet"]["property_name"], "SolTranNet")
 
 
 if __name__ == "__main__":

@@ -98,11 +98,7 @@ def render_rdkit_chemical_svg(design: PolyamideDesign) -> ChemicalRendering:
     options.setQueryColour((0, 0, 0))
     options.setVariableAttachmentColour((0, 0, 0))
 
-    legend = (
-        f"{design.options.architecture}; {design.chain_code}; "
-        "RDKit 2D depiction"
-    )
-    drawer.DrawMolecule(mol, legend=legend)
+    drawer.DrawMolecule(mol)
     drawer.FinishDrawing()
 
     svg = drawer.GetDrawingText()
@@ -177,28 +173,31 @@ def _assign_polyamide_figure_coords(mol, built: _BuiltPolyamide, design: Polyami
 
     if design.options.architecture == "hairpin":
         top_count = len(design.top_monomers)
+        bottom_count = len(monomers) - top_count
         spacing = 3.0
         top_y = 1.95
         bottom_y = -1.95
 
         for index, monomer in enumerate(monomers[:top_count]):
-            center = ((top_count - 1 - index) * spacing, top_y + _stagger(index, 0.16))
-            _place_monomer(coords, monomer, center, math.pi)
-
-        for index, monomer in enumerate(monomers[top_count:]):
-            center = (index * spacing, bottom_y - _stagger(index, 0.16))
+            center = (index * spacing, top_y + _stagger(index, 0.16))
             _place_monomer(coords, monomer, center, 0.0)
 
+        for index, monomer in enumerate(monomers[top_count:]):
+            center = ((bottom_count - 1 - index) * spacing, bottom_y - _stagger(index, 0.16))
+            _place_monomer(coords, monomer, center, math.pi)
+
         if built.turn and len(monomers) > top_count:
-            _place_turn(coords, built.turn, monomers[top_count - 1], monomers[top_count])
+            _place_turn(coords, built.turn, monomers[top_count - 1], monomers[top_count], side="right")
+        terminal_direction = (-1.0, -0.18)
     else:
         spacing = 2.85
         for index, monomer in enumerate(monomers):
             center = (index * spacing, -0.48 * index + _stagger(index, 0.10))
             _place_monomer(coords, monomer, center, 0.0)
+        terminal_direction = (1.0, -0.18)
 
-    _place_tail(coords, built.tail, monomers)
-    _place_terminal_amides(coords, built.terminal_amides)
+    _place_tail(coords, built.tail, monomers, terminal_direction)
+    _place_terminal_amides(coords, built.terminal_amides, terminal_direction)
     _fill_missing_coords(mol, coords)
 
     conf = mol.GetConformer() if mol.GetNumConformers() else None
@@ -250,48 +249,51 @@ def _place_monomer(
 def _place_turn(
     coords: list[tuple[float, float] | None],
     turn: _TurnAtoms,
-    top_left: _MonomerAtoms,
-    bottom_left: _MonomerAtoms,
+    top_anchor_monomer: _MonomerAtoms,
+    bottom_anchor_monomer: _MonomerAtoms,
+    side: str,
 ) -> None:
-    top_anchor = coords[top_left.carbonyl_c]
-    bottom_anchor = coords[bottom_left.in_n]
+    top_anchor = coords[top_anchor_monomer.carbonyl_c]
+    bottom_anchor = coords[bottom_anchor_monomer.in_n]
     if top_anchor is None or bottom_anchor is None:
         return
 
-    left_x = min(top_anchor[0], bottom_anchor[0]) - 0.95
+    direction = 1.0 if side == "right" else -1.0
+    outside_x = (max(top_anchor[0], bottom_anchor[0]) + 0.95) if direction > 0 else (min(top_anchor[0], bottom_anchor[0]) - 0.95)
     middle_y = (top_anchor[1] + bottom_anchor[1]) / 2
-    coords[turn.in_n] = (left_x + 0.24, top_anchor[1] - 0.22)
+    coords[turn.in_n] = (outside_x - direction * 0.24, top_anchor[1] - 0.22)
 
     if len(turn.methylenes) == 3:
         methylene_points = [
-            (left_x - 0.40, top_anchor[1] - 0.72),
-            (left_x - 0.68, middle_y),
-            (left_x - 0.40, bottom_anchor[1] + 0.72),
+            (outside_x + direction * 0.40, top_anchor[1] - 0.72),
+            (outside_x + direction * 0.68, middle_y),
+            (outside_x + direction * 0.40, bottom_anchor[1] + 0.72),
         ]
     elif len(turn.methylenes) == 2:
         methylene_points = [
-            (left_x - 0.52, top_anchor[1] - 0.76),
-            (left_x - 0.52, bottom_anchor[1] + 0.76),
+            (outside_x + direction * 0.52, top_anchor[1] - 0.76),
+            (outside_x + direction * 0.52, bottom_anchor[1] + 0.76),
         ]
     else:
         methylene_points = [
-            (left_x - 0.58, top_anchor[1] + (bottom_anchor[1] - top_anchor[1]) * (index + 1) / (len(turn.methylenes) + 1))
+            (outside_x + direction * 0.58, top_anchor[1] + (bottom_anchor[1] - top_anchor[1]) * (index + 1) / (len(turn.methylenes) + 1))
             for index in range(len(turn.methylenes))
         ]
 
     for atom_index, point in zip(turn.methylenes, methylene_points):
         coords[atom_index] = point
 
-    carbonyl = (left_x + 0.24, bottom_anchor[1] + 0.22)
+    carbonyl = (outside_x - direction * 0.24, bottom_anchor[1] + 0.22)
 
     coords[turn.carbonyl_c] = carbonyl
-    coords[turn.carbonyl_o] = (carbonyl[0] - 0.50, carbonyl[1] - 0.38)
+    coords[turn.carbonyl_o] = (carbonyl[0] + direction * 0.50, carbonyl[1] - 0.38)
 
 
 def _place_tail(
     coords: list[tuple[float, float] | None],
     tail: _TailAtoms | None,
     monomers: tuple[_MonomerAtoms, ...],
+    direction_hint: tuple[float, float],
 ) -> None:
     if tail is None:
         return
@@ -300,7 +302,7 @@ def _place_tail(
     if anchor is None:
         anchor = coords[monomers[-1].carbonyl_c] or (0.0, 0.0)
 
-    direction = _unit((1.0, -0.18))
+    direction = _unit(direction_hint)
     normal = _perp(direction)
     cursor = _add(anchor, _scale(direction, 1.02))
     coords[tail.amide_n] = cursor
@@ -318,12 +320,14 @@ def _place_tail(
 def _place_terminal_amides(
     coords: list[tuple[float, float] | None],
     terminal_amides: tuple[_TerminalAmideAtoms, ...],
+    direction_hint: tuple[float, float],
 ) -> None:
+    direction = _unit(direction_hint)
     for terminal in terminal_amides:
         anchor = coords[terminal.anchor_carbonyl] if terminal.anchor_carbonyl is not None else None
         if anchor is None:
             anchor = (0.0, 0.0)
-        coords[terminal.terminal_n] = _add(anchor, (0.72, -0.12))
+        coords[terminal.terminal_n] = _add(anchor, _scale(direction, 0.72))
 
 
 def _fill_missing_coords(mol, coords: list[tuple[float, float] | None]) -> None:

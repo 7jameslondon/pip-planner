@@ -7,6 +7,7 @@ from typing import Iterable
 
 from .chemistry import render_rdkit_chemical_svg
 from .model import PolyamideDesign, ensure_output_dir
+from .molecular_model import write_molecular_model_files
 from .solubility import predict_solubility
 
 
@@ -25,6 +26,8 @@ SVG_STYLE = """
     .tiny { font-family: Arial, Helvetica, sans-serif; font-size: 10px; }
     .title { font-family: Georgia, 'Times New Roman', serif; font-size: 34px; font-weight: 700; }
     .section-title { font-family: Georgia, 'Times New Roman', serif; font-size: 30px; font-weight: 700; }
+    .legend-label { font-family: Georgia, 'Times New Roman', serif; font-size: 26px; font-weight: 700; }
+    .turn-symbol { font-family: Georgia, 'Times New Roman', serif; font-size: 26px; font-weight: 700; }
     .base { font-family: Georgia, 'Times New Roman', serif; font-size: 26px; font-weight: 700; }
     .terminus { font-family: Georgia, 'Times New Roman', serif; font-size: 22px; font-weight: 700; }
     .caption { font-family: Arial, Helvetica, sans-serif; font-size: 13px; }
@@ -43,8 +46,8 @@ def render_schematic_svg(design: PolyamideDesign) -> str:
     y_top_dna = 84
     y_bottom_dna = 256 if is_hairpin else 232
     figure_bottom = 318 if is_hairpin else 288
-    legend_y = figure_bottom + 54
-    height = max(470, legend_y + 96)
+    legend_y = figure_bottom + 60
+    height = max(430, legend_y + 42)
 
     parts = [_svg_header(width, height, f"PIP schematic for {design.sequence}")]
     parts.append(f'<rect class="bg" x="0" y="0" width="{width}" height="{height}"/>')
@@ -56,14 +59,6 @@ def render_schematic_svg(design: PolyamideDesign) -> str:
     else:
         parts.append(_linear_polyamide_symbols(design, start_x, gap, y_top_dna, y_bottom_dna))
 
-    parts.append(
-        _text_center(
-            width / 2,
-            figure_bottom,
-            f"{design.options.architecture}; {_schematic_chain_code(design)}; A/T mode: {design.options.at_mode}",
-            "caption muted",
-        )
-    )
     parts.append(_schematic_legend((width - 520) / 2, legend_y))
     parts.append("</g>")
 
@@ -75,7 +70,12 @@ def render_chemical_svg(design: PolyamideDesign) -> str:
     return render_rdkit_chemical_svg(design).svg
 
 
-def write_design_files(design: PolyamideDesign, out_dir: str | Path, name: str) -> dict[str, Path]:
+def write_design_files(
+    design: PolyamideDesign,
+    out_dir: str | Path,
+    name: str,
+    extra_payload: dict | None = None,
+) -> dict[str, Path]:
     out_path = ensure_output_dir(out_dir)
     safe_name = _safe_filename(name)
     schematic_path = out_path / f"{safe_name}-schematic.svg"
@@ -85,17 +85,27 @@ def write_design_files(design: PolyamideDesign, out_dir: str | Path, name: str) 
     schematic_path.write_text(render_schematic_svg(design), encoding="utf-8")
     chemical_rendering = render_rdkit_chemical_svg(design)
     chemical_path.write_text(chemical_rendering.svg, encoding="utf-8")
+    model_payload = write_molecular_model_files(
+        design,
+        out_path,
+        safe_name,
+        chemical_rendering.canonical_smiles,
+    )
     json_payload = design.to_dict() | {
         "files": {
             "schematic_svg": str(schematic_path),
             "chemical_svg": str(chemical_path),
             "json": str(json_path),
+            **model_payload["model_3d"]["files"],
         },
         "chemical_renderer": chemical_rendering.renderer,
         "chemical_smiles": chemical_rendering.canonical_smiles,
         "chemical_svg_note": chemical_rendering.note,
         "solubility_predictions": list(predict_solubility(chemical_rendering.canonical_smiles)),
+        **model_payload,
     }
+    if extra_payload:
+        json_payload |= extra_payload
     json_path.write_text(json.dumps(json_payload, indent=2), encoding="utf-8")
 
     return {
@@ -120,6 +130,10 @@ def _text(x: float, y: float, text: str, class_name: str) -> str:
 
 def _text_center(x: float, y: float, text: str, class_name: str) -> str:
     return f'<text class="{class_name}" x="{x:.1f}" y="{y:.1f}" text-anchor="middle">{escape(str(text))}</text>'
+
+
+def _text_end(x: float, y: float, text: str, class_name: str) -> str:
+    return f'<text class="{class_name}" x="{x:.1f}" y="{y:.1f}" text-anchor="end">{escape(str(text))}</text>'
 
 
 def _box_text(x: float, y: float, width: float, height: float, text: str, class_name: str) -> str:
@@ -158,28 +172,16 @@ def _schematic_legend(x: float, y: float) -> str:
     ]
     parts = [
         '<g class="schematic-legend" data-legend="polyamide-symbols">',
-        _text(x, y, "Polyamide", "title ink"),
-        f'<line class="line" x1="{x:.1f}" y1="{y + 12:.1f}" x2="{x + 200:.1f}" y2="{y + 12:.1f}"/>',
     ]
-    row_y = y + 60
+    row_y = y
     for index, (label, monomer) in enumerate(rows):
         current_x = x + index * 132
-        parts.append(_text(current_x, row_y + 8, f"{label} =", "section-title ink"))
-        parts.append(_monomer_symbol(monomer, current_x + 82, row_y, 16))
+        equals_x = current_x + 50
+        parts.append(_text_end(equals_x - 12, row_y + 8, label, "legend-label ink"))
+        parts.append(_text_center(equals_x, row_y + 8, "=", "legend-label ink"))
+        parts.append(_monomer_symbol(monomer, equals_x + 56, row_y, 16))
     parts.append("</g>")
     return "\n".join(parts)
-
-
-def _schematic_chain_code(design: PolyamideDesign) -> str:
-    return "-".join(_schematic_monomer_label(monomer) for monomer in design.chain_monomers)
-
-
-def _schematic_monomer_label(label: str) -> str:
-    labels = {
-        "gamma-turn": "γ",
-        "beta-turn": "β",
-    }
-    return labels.get(label, label)
 
 
 def _dna_rows(
@@ -190,14 +192,14 @@ def _dna_rows(
     y_bottom: float,
 ) -> str:
     parts = [
-        _text(start_x - 76, y_top + 8, "5'-", "terminus ink"),
-        _text(start_x - 76, y_bottom + 8, "3'-", "terminus ink"),
+        _text(start_x - 66, y_top + 8, "5'", "terminus ink"),
+        _text(start_x - 66, y_bottom + 8, "3'", "terminus ink"),
     ]
     x_last = start_x + max(0, len(design.base_pairs) - 1) * gap
     parts.extend(
         [
-            _text(x_last + 30, y_top + 8, "-3'", "terminus ink"),
-            _text(x_last + 30, y_bottom + 8, "-5'", "terminus ink"),
+            _text(x_last + 34, y_top + 8, "3'", "terminus ink"),
+            _text(x_last + 34, y_bottom + 8, "5'", "terminus ink"),
         ]
     )
 
@@ -225,7 +227,7 @@ def _hairpin_polyamide_symbols(
         f'<line class="polyamide-backbone" x1="{left_stub:.1f}" y1="{top_y:.1f}" x2="{turn_x:.1f}" y2="{top_y:.1f}"/>',
         f'<path class="polyamide-backbone" d="M {turn_x:.1f},{top_y:.1f} C {turn_x + 34:.1f},{top_y:.1f} {turn_x + 34:.1f},{bottom_y:.1f} {turn_x:.1f},{bottom_y:.1f}"/>',
         f'<line class="polyamide-backbone" x1="{turn_x:.1f}" y1="{bottom_y:.1f}" x2="{left_stub:.1f}" y2="{bottom_y:.1f}"/>',
-        _text(turn_x + 48, (top_y + bottom_y) / 2 + 5, turn_label, "small ink"),
+        _text(turn_x + 48, (top_y + bottom_y) / 2 + 9, turn_label, "turn-symbol ink"),
         _text_center(left_stub - 18, top_y + 8, "+", "section-title ink"),
     ]
     if design.options.tail == "dp":

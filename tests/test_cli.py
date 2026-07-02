@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -38,9 +39,13 @@ class CliTests(unittest.TestCase):
 
             chemical = Path(payload["files"]["chemical_svg"])
             schematic = Path(payload["files"]["schematic_svg"])
+            complex_pdb = Path(payload["files"]["complex_pdb"])
+            model_html = Path(payload["files"]["model_html"])
             design_json = Path(payload["files"]["json"])
             self.assertTrue(chemical.exists())
             self.assertTrue(schematic.exists())
+            self.assertTrue(complex_pdb.exists())
+            self.assertTrue(model_html.exists())
             self.assertTrue(design_json.exists())
             chemical_svg = chemical.read_text(encoding="utf-8")
             self.assertIn("<svg", chemical_svg)
@@ -49,6 +54,8 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("#0000FF", chemical_svg)
             self.assertNotIn("stroke:#FF0000", chemical_svg)
             self.assertNotIn("stroke:#0000FF", chemical_svg)
+            self.assertNotIn("hairpin;", chemical_svg)
+            self.assertNotIn("RDKit 2D depiction", chemical_svg)
             schematic_svg = schematic.read_text(encoding="utf-8")
             self.assertIn("PIP schematic", schematic_svg)
             self.assertIn('data-schematic="polyamide-figure"', schematic_svg)
@@ -56,14 +63,27 @@ class CliTests(unittest.TestCase):
             self.assertIn('class="monomer im-symbol"', schematic_svg)
             self.assertIn('class="monomer py-symbol"', schematic_svg)
             self.assertIn('class="monomer hp-symbol"', schematic_svg)
+            self.assertIn('class="turn-symbol ink"', schematic_svg)
             self.assertIn("\u03b3", schematic_svg)
             self.assertNotIn(">Sequence<", schematic_svg)
+            self.assertNotIn(">Polyamide<", schematic_svg)
+            self.assertNotIn("hairpin;", schematic_svg)
+            self.assertNotIn("A/T mode:", schematic_svg)
+            self.assertNotIn("5&#x27;-", schematic_svg)
+            self.assertNotIn("-3&#x27;", schematic_svg)
             self.assertNotIn("short recognition sites", schematic_svg)
             self.assertTrue(payload["chemical_renderer"].startswith("RDKit "))
             self.assertIn("chemical_smiles", payload)
             self.assertIn("C(=O)", payload["chemical_smiles"])
             solubility_methods = {prediction["method"] for prediction in payload["solubility_predictions"]}
             self.assertEqual(solubility_methods, {"ADMET-AI v2", "SolTranNet"})
+            self.assertEqual(payload["genome_occurrences"]["status"], "skipped")
+            self.assertEqual(payload["model_3d"]["dna_force_field"], "AMBER DNA.OL24")
+            self.assertEqual(payload["model_3d"]["binder_force_field"], "GAFF2")
+            self.assertIn(payload["model_3d"]["md_simulation"]["status"], {"not_run", "engine_available_not_run"})
+            complex_text = complex_pdb.read_text(encoding="utf-8")
+            self.assertIn("HETATM", complex_text)
+            self.assertIn("AMBER DNA.OL24", complex_text)
 
     def test_cli_rejects_invalid_sequence(self) -> None:
         completed = subprocess.run(
@@ -99,6 +119,39 @@ class CliTests(unittest.TestCase):
             self.assertEqual(completed.returncode, 0, completed.stderr)
             payload = json.loads(completed.stdout)
             self.assertEqual(payload["sequence"], "GTAC")
+
+    def test_cli_can_count_local_genome_occurrences(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            env = os.environ.copy()
+            env["PIP_PLANNER_GENOME_DIR"] = str(ROOT / "tests" / "fixtures" / "genomes")
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pip_planner",
+                    "design",
+                    "ATGC",
+                    "--out",
+                    tmp,
+                    "--format",
+                    "json",
+                    "--genome",
+                    "human-grch38",
+                ],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                capture_output=True,
+                timeout=20,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            payload = json.loads(completed.stdout)
+            genome = payload["genome_occurrences"]
+            self.assertEqual(genome["status"], "ok")
+            self.assertEqual(genome["total_occurrences"], 2)
+            self.assertTrue(genome["locations_listed"])
+            self.assertIn("GENE1", genome["locations"][0]["feature_summary"])
 
 
 if __name__ == "__main__":

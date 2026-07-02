@@ -112,11 +112,15 @@ def _predict_soltrannet(smiles: str) -> SolubilityPrediction:
 
 def _predict_soltrannet_raw(smiles: str) -> SolubilityPrediction:
     module = import_module("soltrannet")
-    predictions = list(module.predict([smiles]))
+    try:
+        predictions = list(module.predict([smiles], num_workers=0))
+    except TypeError:
+        predictions = list(module.predict([smiles]))
     if not predictions:
         raise ValueError("SolTranNet did not return a prediction.")
 
-    property_name, value = _find_solubility_value(predictions[0])
+    prediction = predictions[0]
+    property_name, value = _find_soltrannet_value(prediction)
     if value is None:
         raise ValueError("SolTranNet returned a non-numeric prediction.")
 
@@ -128,6 +132,14 @@ def _predict_soltrannet_raw(smiles: str) -> SolubilityPrediction:
         property_name=property_name or "SolTranNet",
         version=_package_version("soltrannet", fallback_module=module),
     )
+
+
+def _find_soltrannet_value(prediction: Any) -> tuple[str | None, float | None]:
+    if isinstance(prediction, (list, tuple)) and prediction:
+        value = _coerce_float(prediction[0])
+        if value is not None:
+            return "SolTranNet", value
+    return _find_solubility_value(prediction)
 
 
 def _find_solubility_value(prediction: Any) -> tuple[str | None, float | None]:

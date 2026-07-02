@@ -11,6 +11,7 @@ import time
 from urllib.parse import unquote, urlparse
 import uuid
 
+from .genome import GENOME_NONE_ID, list_genomes
 from .model import safe_design_name
 
 
@@ -165,7 +166,43 @@ HTML_PAGE = """<!doctype html>
       line-height: 1.35;
       white-space: pre-line;
     }
-    .metric.solubility { grid-column: 1 / -1; }
+    .metric.solubility, .metric.genome { grid-column: 1 / -1; }
+    .genome-panel {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      margin: 0 0 18px;
+      overflow: auto;
+      display: none;
+    }
+    .genome-panel.is-visible { display: block; }
+    .genome-panel .empty {
+      text-align: left;
+      padding: 14px;
+    }
+    .location-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+      min-width: 680px;
+    }
+    .location-table th,
+    .location-table td {
+      border-bottom: 1px solid var(--line);
+      padding: 9px 10px;
+      text-align: left;
+      vertical-align: top;
+    }
+    .location-table th {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+      background: #f8fafc;
+    }
+    .location-table td.code {
+      font-family: Consolas, 'Liberation Mono', monospace;
+      white-space: nowrap;
+    }
     .toolbar {
       display: flex;
       flex-wrap: wrap;
@@ -210,6 +247,13 @@ HTML_PAGE = """<!doctype html>
       max-width: 100%;
       height: auto;
       display: block;
+    }
+    .model-frame {
+      width: 100%;
+      min-height: 620px;
+      border: 0;
+      display: block;
+      background: #000000;
     }
     .message {
       border-radius: 8px;
@@ -297,6 +341,13 @@ HTML_PAGE = """<!doctype html>
           </div>
         </div>
 
+        <label for="genome">Genome</label>
+        <select id="genome" name="genome">
+          <option value="none">Not searched</option>
+          <option value="human-grch38">Human GRCh38</option>
+          <option value="hela">HeLa</option>
+        </select>
+
         <button class="primary" type="submit" id="submit">Update now</button>
       </form>
 
@@ -311,13 +362,19 @@ HTML_PAGE = """<!doctype html>
         <div class="metric"><span>Pairs</span><strong id="metric-pairs">-</strong></div>
         <div class="metric"><span>Chain</span><strong id="metric-chain">-</strong></div>
         <div class="metric solubility"><span>Solubility</span><strong id="metric-solubility">-</strong></div>
+        <div class="metric genome"><span>Genome occurrences</span><strong id="metric-genome">-</strong></div>
+        <div class="metric genome"><span>3D/MD model</span><strong id="metric-model">-</strong></div>
       </section>
+
+      <section class="genome-panel" id="genome-panel" aria-label="Genome occurrence locations"></section>
 
       <div class="toolbar">
         <button class="tab" type="button" data-view="chemical" aria-selected="true">Chemical structure</button>
         <button class="tab" type="button" data-view="schematic" aria-selected="false">Schematic</button>
+        <button class="tab" type="button" data-view="model" aria-selected="false">3D model</button>
         <a class="download" id="download-chemical" href="#" download>Download chemical SVG</a>
         <a class="download secondary" id="download-schematic" href="#" download>Download schematic SVG</a>
+        <a class="download secondary" id="download-model" href="#" download>Download PDB</a>
       </div>
 
       <section class="preview" id="preview" aria-live="polite">
@@ -332,6 +389,7 @@ HTML_PAGE = """<!doctype html>
     const sequenceInput = document.querySelector('#sequence');
     const submit = document.querySelector('#submit');
     const preview = document.querySelector('#preview');
+    const genomePanel = document.querySelector('#genome-panel');
     const warnings = document.querySelector('#warnings');
     const errors = document.querySelector('#errors');
     const tabs = [...document.querySelectorAll('.tab')];
@@ -348,7 +406,8 @@ HTML_PAGE = """<!doctype html>
         architecture: data.get('architecture'),
         at_mode: data.get('at_mode'),
         tail: data.get('tail'),
-        turn: data.get('turn')
+        turn: data.get('turn'),
+        genome: data.get('genome')
       };
     }
 
@@ -388,6 +447,89 @@ HTML_PAGE = """<!doctype html>
       }).join('\\n');
     }
 
+    function formatGenomeOccurrences(genomeResult) {
+      if (!genomeResult || genomeResult.status === 'skipped') return 'Not searched';
+      if (genomeResult.status === 'missing_reference') return 'Reference missing';
+      if (genomeResult.status !== 'ok') return genomeResult.status || 'Unavailable';
+      const count = Number(genomeResult.total_occurrences);
+      const label = genomeResult.genome_label || genomeResult.genome_id || 'Genome';
+      return Number.isFinite(count) ? count.toLocaleString() + ' in ' + label : label;
+    }
+
+    function formatModelStatus(modelResult) {
+      if (!modelResult) return 'Not generated';
+      const simulation = modelResult.md_simulation || {};
+      const status = simulation.status || modelResult.status || 'unknown';
+      const atoms = Number(modelResult.atom_count);
+      const countText = Number.isFinite(atoms) ? atoms.toLocaleString() + ' atoms' : 'model generated';
+      return status + ' | ' + countText;
+    }
+
+    function renderGenomePanel(genomeResult) {
+      if (!genomeResult || genomeResult.status === 'skipped') {
+        genomePanel.classList.remove('is-visible');
+        genomePanel.innerHTML = '';
+        return;
+      }
+
+      genomePanel.classList.add('is-visible');
+      if (genomeResult.status !== 'ok') {
+        genomePanel.innerHTML = '<div class="empty">' + escapeHtml(genomeResult.message || 'Genome search is unavailable.') + '</div>';
+        return;
+      }
+
+      const locations = Array.isArray(genomeResult.locations) ? genomeResult.locations : [];
+      if (!genomeResult.locations_listed || locations.length === 0) {
+        genomePanel.innerHTML = '<div class="empty">' + escapeHtml(genomeResult.message || 'No locations are listed.') + '</div>';
+        return;
+      }
+
+      const rows = locations.map(location => {
+        return '<tr>' +
+          '<td class="code">' + escapeHtml(location.contig) + '</td>' +
+          '<td class="code">' + escapeHtml(location.start) + '</td>' +
+          '<td class="code">' + escapeHtml(location.end) + '</td>' +
+          '<td class="code">' + escapeHtml(location.strand) + '</td>' +
+          '<td>' + escapeHtml(location.feature_summary || 'No annotation') + '</td>' +
+          '</tr>';
+      }).join('');
+
+      genomePanel.innerHTML =
+        '<table class="location-table">' +
+        '<thead><tr><th>Contig</th><th>Start</th><th>End</th><th>Strand</th><th>Overlapping annotation</th></tr></thead>' +
+        '<tbody>' + rows + '</tbody>' +
+        '</table>';
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? '').replace(/[&<>"']/g, character => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;'
+      })[character]);
+    }
+
+    async function loadGenomes() {
+      const genomeSelect = document.querySelector('#genome');
+      try {
+        const response = await fetch('/api/genomes');
+        if (!response.ok) return;
+        const payload = await response.json();
+        if (!Array.isArray(payload.genomes)) return;
+        const selected = genomeSelect.value;
+        const options = [{ id: 'none', label: 'Not searched', available: true }].concat(payload.genomes);
+        genomeSelect.innerHTML = options.map(genome => {
+          const label = genome.label + (genome.available === false ? ' (missing data)' : '');
+          return '<option value="' + escapeHtml(genome.id) + '">' + escapeHtml(label) + '</option>';
+        }).join('');
+        genomeSelect.value = options.some(genome => genome.id === selected) ? selected : 'none';
+      } catch (error) {
+        return;
+      }
+    }
+
     function renderResult(result) {
       currentResult = result;
       const design = result.design;
@@ -396,25 +538,36 @@ HTML_PAGE = """<!doctype html>
       document.querySelector('#metric-pairs').textContent = design.recognition_pairs.join(' ');
       document.querySelector('#metric-chain').textContent = design.chain_code;
       document.querySelector('#metric-solubility').textContent = formatSolubility(design.solubility_predictions);
+      document.querySelector('#metric-genome').textContent = formatGenomeOccurrences(design.genome_occurrences);
+      document.querySelector('#metric-model').textContent = formatModelStatus(design.model_3d);
+      renderGenomePanel(design.genome_occurrences);
       showMessage(warnings, design.warnings.join(' '));
       showMessage(errors, '');
 
       document.querySelector('#download-chemical').href = result.generated.chemical_svg_url;
       document.querySelector('#download-schematic').href = result.generated.schematic_svg_url;
+      document.querySelector('#download-model').href = result.generated.complex_pdb_url;
       document.querySelector('#download-chemical').download = result.generated.chemical_svg_name;
       document.querySelector('#download-schematic').download = result.generated.schematic_svg_name;
+      document.querySelector('#download-model').download = result.generated.complex_pdb_name;
       document.querySelector('#files').textContent =
         'Generated with ' + design.chemical_renderer + '. SMILES: ' + design.chemical_smiles +
-        ' | Files: ' + design.files.chemical_svg + ' | ' + design.files.schematic_svg;
+        ' | Files: ' + design.files.chemical_svg + ' | ' + design.files.schematic_svg +
+        ' | ' + design.files.complex_pdb;
 
       renderPreview();
     }
 
     function renderPreview() {
       if (!currentResult) return;
-      preview.innerHTML = currentView === 'chemical'
-        ? currentResult.chemical_svg
-        : currentResult.schematic_svg;
+      if (currentView === 'chemical') {
+        preview.innerHTML = currentResult.chemical_svg;
+      } else if (currentView === 'schematic') {
+        preview.innerHTML = currentResult.schematic_svg;
+      } else {
+        preview.innerHTML = '<iframe class="model-frame" title="3D DNA polyamide model" src="' +
+          escapeHtml(currentResult.generated.model_html_url) + '"></iframe>';
+      }
       tabs.forEach(tab => {
         tab.setAttribute('aria-selected', String(tab.dataset.view === currentView));
       });
@@ -472,6 +625,7 @@ HTML_PAGE = """<!doctype html>
     form.addEventListener('submit', design);
     form.addEventListener('input', () => scheduleDesign());
     form.addEventListener('change', () => scheduleDesign(0));
+    loadGenomes();
     design();
   </script>
 </body>
@@ -493,6 +647,10 @@ class PlannerRequestHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/favicon.ico":
             self._send_bytes(HTTPStatus.NO_CONTENT, b"", "image/x-icon")
+            return
+
+        if parsed.path == "/api/genomes":
+            self._send_json(HTTPStatus.OK, {"genomes": list_genomes()})
             return
 
         if parsed.path.startswith("/generated/"):
@@ -545,6 +703,8 @@ class PlannerRequestHandler(BaseHTTPRequestHandler):
         at_mode = _choice(payload, "at_mode", {"distinguish", "py-py"}, "distinguish")
         tail = _choice(payload, "tail", {"dp", "none"}, "dp")
         turn = _choice(payload, "turn", {"gamma", "beta", "none"}, "gamma")
+        genome_ids = {GENOME_NONE_ID, *(str(genome["id"]) for genome in list_genomes())}
+        genome = _choice(payload, "genome", genome_ids, GENOME_NONE_ID)
 
         safe_name = safe_design_name(sequence, architecture)
         run_id = f"{int(time.time())}-{uuid.uuid4().hex[:8]}-{safe_name}"
@@ -563,6 +723,8 @@ class PlannerRequestHandler(BaseHTTPRequestHandler):
             tail,
             "--turn",
             turn,
+            "--genome",
+            genome,
             "--out",
             str(run_dir),
             "--name",
@@ -576,7 +738,7 @@ class PlannerRequestHandler(BaseHTTPRequestHandler):
             cwd=str(self.project_root),
             text=True,
             capture_output=True,
-            timeout=20,
+            timeout=180,
         )
         if completed.returncode != 0:
             error = completed.stderr.strip() or completed.stdout.strip() or "CLI command failed."
@@ -590,8 +752,12 @@ class PlannerRequestHandler(BaseHTTPRequestHandler):
         files = cli_payload.get("files", {})
         chemical_path = Path(files["chemical_svg"]).resolve()
         schematic_path = Path(files["schematic_svg"]).resolve()
+        model_html_path = Path(files["model_html"]).resolve()
+        complex_pdb_path = Path(files["complex_pdb"]).resolve()
         _assert_within(chemical_path, self.output_root)
         _assert_within(schematic_path, self.output_root)
+        _assert_within(model_html_path, self.output_root)
+        _assert_within(complex_pdb_path, self.output_root)
 
         return {
             "design": cli_payload,
@@ -601,8 +767,11 @@ class PlannerRequestHandler(BaseHTTPRequestHandler):
                 "run_id": run_id,
                 "chemical_svg_url": f"/generated/{run_id}/{chemical_path.name}",
                 "schematic_svg_url": f"/generated/{run_id}/{schematic_path.name}",
+                "model_html_url": f"/generated/{run_id}/{model_html_path.name}",
+                "complex_pdb_url": f"/generated/{run_id}/{complex_pdb_path.name}",
                 "chemical_svg_name": chemical_path.name,
                 "schematic_svg_name": schematic_path.name,
+                "complex_pdb_name": complex_pdb_path.name,
             },
             "invoked_command": command,
         }
@@ -620,11 +789,19 @@ class PlannerRequestHandler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.FORBIDDEN, {"error": "Generated file path is not allowed."})
             return
 
-        if not candidate.exists() or candidate.suffix not in {".svg", ".json"}:
+        allowed_suffixes = {".svg", ".json", ".html", ".pdb", ".md"}
+        if not candidate.exists() or candidate.suffix not in allowed_suffixes:
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "Generated file not found."})
             return
 
-        content_type = "image/svg+xml; charset=utf-8" if candidate.suffix == ".svg" else "application/json; charset=utf-8"
+        content_types = {
+            ".svg": "image/svg+xml; charset=utf-8",
+            ".json": "application/json; charset=utf-8",
+            ".html": "text/html; charset=utf-8",
+            ".pdb": "chemical/x-pdb; charset=utf-8",
+            ".md": "text/markdown; charset=utf-8",
+        }
+        content_type = content_types[candidate.suffix]
         self._send_bytes(HTTPStatus.OK, candidate.read_bytes(), content_type)
 
     def _send_json(self, status: HTTPStatus, payload: dict) -> None:

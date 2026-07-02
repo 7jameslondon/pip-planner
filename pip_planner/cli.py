@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import sys
 
+from .genome import GENOME_NONE_ID, analyze_genome_occurrences
 from .model import DesignOptions, SequenceValidationError, design_polyamide, safe_design_name
 from .svg import write_design_files
 
@@ -61,6 +62,17 @@ def build_parser() -> argparse.ArgumentParser:
         default="text",
         help="Write a human summary or machine-readable JSON to stdout. Default: text.",
     )
+    design_parser.add_argument(
+        "--genome",
+        default=GENOME_NONE_ID,
+        help="Local genome reference to scan for exact occurrences. Use 'human-grch38', 'hela', or 'none'. Default: none.",
+    )
+    design_parser.add_argument(
+        "--genome-location-threshold",
+        type=int,
+        default=100,
+        help="List occurrence locations only when the total count is below this value. Default: 100.",
+    )
 
     return parser
 
@@ -80,6 +92,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command != "design":
         parser.error("Unsupported command.")
+    if args.genome_location_threshold < 1:
+        parser.error("--genome-location-threshold must be at least 1.")
 
     try:
         options = DesignOptions(
@@ -90,7 +104,19 @@ def main(argv: list[str] | None = None) -> int:
         )
         design = design_polyamide(args.sequence, options)
         name = args.name or safe_design_name(design.sequence, design.options.architecture)
-        files = write_design_files(design, Path(args.out), name)
+        genome_occurrences = analyze_genome_occurrences(
+            design.sequence,
+            args.genome,
+            location_threshold=args.genome_location_threshold,
+        )
+        if genome_occurrences["status"] == "unknown_genome":
+            parser.error(str(genome_occurrences["message"]))
+        files = write_design_files(
+            design,
+            Path(args.out),
+            name,
+            extra_payload={"genome_occurrences": genome_occurrences},
+        )
         persisted_payload = json.loads(files["json"].read_text(encoding="utf-8"))
     except SequenceValidationError as exc:
         parser.error(str(exc))
@@ -136,8 +162,15 @@ def _format_text_summary(payload: dict) -> str:
             "Solubility predictions:",
             *_format_solubility_rows(payload.get("solubility_predictions", [])),
             "",
+            "Genome occurrences:",
+            *_format_genome_rows(payload.get("genome_occurrences", {})),
+            "",
+            "3D/MD model:",
+            *_format_model_rows(payload.get("model_3d", {})),
+            "",
             f"Schematic SVG: {payload['files']['schematic_svg']}",
             f"Chemical SVG:  {payload['files']['chemical_svg']}",
+            f"Complex PDB:   {payload['files']['complex_pdb']}",
             f"Design JSON:   {payload['files']['json']}",
         ]
     )
@@ -169,3 +202,38 @@ def _format_solubility_rows(predictions: list[dict]) -> list[str]:
             message = prediction.get("message") or status
             rows.append(f"  - {method}: {status} - {message}")
     return rows
+
+
+def _format_genome_rows(genome_result: dict) -> list[str]:
+    status = genome_result.get("status") or "skipped"
+    if status == "skipped":
+        return ["  - Not searched."]
+    if status == "missing_reference":
+        return [f"  - {genome_result.get('genome_label', 'Genome')}: missing local FASTA."]
+    if status != "ok":
+        message = genome_result.get("message") or status
+        return [f"  - {message}"]
+
+    genome_label = genome_result.get("genome_label") or genome_result.get("genome_id") or "Genome"
+    total = genome_result.get("total_occurrences")
+    rows = [f"  - {genome_label}: {total} exact occurrence(s)."]
+    if genome_result.get("locations_listed"):
+        for location in genome_result.get("locations", []):
+            rows.append(
+                "    "
+                f"{location['contig']}:{location['start']}-{location['end']} "
+                f"({location['strand']}) - {location.get('feature_summary', 'No annotation')}"
+            )
+    return rows
+
+
+def _format_model_rows(model_result: dict) -> list[str]:
+    if not model_result:
+        return ["  - Not generated."]
+    simulation = model_result.get("md_simulation") or {}
+    status = simulation.get("status") or model_result.get("status") or "unknown"
+    message = simulation.get("message") or model_result.get("model_type") or ""
+    return [
+        f"  - Model: {model_result.get('model_type', '3D complex model')}",
+        f"  - MD status: {status} - {message}",
+    ]

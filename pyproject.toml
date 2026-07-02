@@ -10,10 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "PIP Planner contributors" }]
-dependencies = ["rdkit>=2026.3.3"]
-
-[project.optional-dependencies]
-solubility = ["admet-ai>=2.0.0", "soltrannet"]
+dependencies = ["rdkit>=2026.3.3", "admet-ai>=2.0.0", "soltrannet"]
 
 [project.scripts]
 pip-planner = "pip_planner.cli:main"

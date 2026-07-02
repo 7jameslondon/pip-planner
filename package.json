@@ -8,6 +8,7 @@
   "scripts": {
     "desktop": ".\\node_modules\\electron\\dist\\electron.exe .",
     "electron": ".\\node_modules\\electron\\dist\\electron.exe .",
+    "dev:launcher": "python scripts\\build_dev_launcher.py",
     "build": "python scripts\\build_windows.py",
     "build:backend": "python scripts\\build_backend.py",
     "build:desktop": "python scripts\\build_desktop.py",

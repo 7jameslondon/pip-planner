@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import importlib.metadata
 import importlib.util
 import shutil
 import subprocess
@@ -15,6 +16,8 @@ ENTRYPOINT = ROOT / "pip_planner" / "web_entry.py"
 
 
 def main() -> int:
+    _remove_obsolete_pathlib_backport()
+
     try:
         import PyInstaller  # noqa: F401
     except ImportError:
@@ -47,7 +50,7 @@ def main() -> int:
         "numpy",
         "--collect-all",
         "PIL",
-        *_optional_package_args(),
+        *_solubility_package_args(),
         "--hidden-import",
         "pip_planner.web",
         "--noupx",
@@ -67,12 +70,24 @@ def main() -> int:
     return 0
 
 
-def _optional_package_args() -> list[str]:
+def _remove_obsolete_pathlib_backport() -> None:
+    try:
+        importlib.metadata.version("pathlib")
+    except importlib.metadata.PackageNotFoundError:
+        return
+
+    print("Removing obsolete pathlib backport before PyInstaller build.")
+    completed = subprocess.run([sys.executable, "-m", "pip", "uninstall", "-y", "pathlib"], cwd=ROOT)
+    if completed.returncode != 0:
+        raise RuntimeError("Could not remove the obsolete pathlib backport required by SolTranNet.")
+
+
+def _solubility_package_args() -> list[str]:
     args: list[str] = []
     for package_name in ("admet_ai", "soltrannet"):
         if importlib.util.find_spec(package_name) is None:
             continue
-        print(f"Including optional solubility package in backend build: {package_name}")
+        print(f"Including solubility package in backend build: {package_name}")
         args.extend(["--collect-all", package_name])
     return args
 

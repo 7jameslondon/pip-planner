@@ -61,8 +61,13 @@ async function main() {
       return title && title.textContent.includes('schematic');
     }, null, { timeout: 10000 });
 
+    await page.click('[data-view="model"]');
+    await page.waitForSelector('#preview iframe.model-frame', { timeout: 10000 });
+    const modelFrame = page.frameLocator('#preview iframe.model-frame');
+    await modelFrame.locator('canvas#scene').waitFor({ timeout: 10000 });
+
     const filesText = await page.locator('#files').textContent();
-    if (!filesText.includes('Generated with RDKit') || !filesText.includes('SMILES:')) {
+    if (!filesText.includes('Generated with RDKit') || !filesText.includes('SMILES:') || !filesText.includes('complex-model.pdb')) {
       throw new Error('RDKit renderer details were not shown in the UI.');
     }
 
