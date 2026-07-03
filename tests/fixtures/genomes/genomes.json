@@ -7,9 +7,9 @@
       "annotations": ["human-grch38/annotations.gff3"]
     },
     {
-      "id": "hela",
-      "label": "HeLa fixture",
-      "fasta": "hela/genome.fa"
+      "id": "private-reference",
+      "label": "Private user reference fixture",
+      "fasta": "private-reference/genome.fa"
     }
   ]
 }

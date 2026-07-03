@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import importlib.metadata
 import importlib.util
+import os
 import shutil
 import subprocess
 import sys
@@ -53,6 +54,7 @@ def main() -> int:
         *_solubility_package_args(),
         "--hidden-import",
         "pip_planner.web",
+        *_data_file_args(),
         "--noupx",
         str(ENTRYPOINT),
     ]
@@ -90,6 +92,13 @@ def _solubility_package_args() -> list[str]:
         print(f"Including solubility package in backend build: {package_name}")
         args.extend(["--collect-all", package_name])
     return args
+
+
+def _data_file_args() -> list[str]:
+    genome_data = ROOT / "data" / "genomes"
+    if not genome_data.exists():
+        return []
+    return ["--add-data", f"{genome_data}{os.pathsep}data/genomes"]
 
 
 def _remove_within_workspace(path: Path) -> None:

@@ -5,7 +5,13 @@ import json
 from pathlib import Path
 import sys
 
-from .genome import GENOME_NONE_ID, analyze_genome_occurrences
+from .genome import (
+    GENOME_NONE_ID,
+    analyze_genome_occurrences,
+    download_genome_reference,
+    import_genome_reference,
+    list_genomes,
+)
 from .model import DesignOptions, SequenceValidationError, design_polyamide, safe_design_name
 from .solubility import predict_solubility
 from .svg import (
@@ -72,7 +78,7 @@ def build_parser() -> argparse.ArgumentParser:
     design_parser.add_argument(
         "--genome",
         default=GENOME_NONE_ID,
-        help="Local genome reference to scan for exact occurrences. Use 'human-grch38', 'hela', or 'none'. Default: none.",
+        help="Genome reference id to scan for exact occurrences. Use 'pip-planner genomes list' to see available ids. Default: none.",
     )
     design_parser.add_argument(
         "--genome-location-threshold",
@@ -87,13 +93,57 @@ def build_parser() -> argparse.ArgumentParser:
         help="Generate one product for incremental UI updates, or all products. Default: all.",
     )
 
+    genomes_parser = subparsers.add_parser(
+        "genomes",
+        help="List, download, or import local genome references.",
+    )
+    genomes_subparsers = genomes_parser.add_subparsers(dest="genomes_command")
+
+    genomes_list = genomes_subparsers.add_parser("list", help="List configured genome references.")
+    genomes_list.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Write a human summary or machine-readable JSON. Default: text.",
+    )
+
+    genomes_download = genomes_subparsers.add_parser("download", help="Download a curated genome reference.")
+    genomes_download.add_argument("genome", help="Genome id to download.")
+    genomes_download.add_argument(
+        "--force",
+        action="store_true",
+        help="Download again even when a local or bundled FASTA is already available.",
+    )
+    genomes_download.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Write a human summary or machine-readable JSON. Default: text.",
+    )
+
+    genomes_import = genomes_subparsers.add_parser("import", help="Import a user-provided FASTA file.")
+    genomes_import.add_argument("fasta", help="Path to a .fa, .fasta, .fna, or gzipped FASTA file.")
+    genomes_import.add_argument("--id", dest="genome_id", default=None, help="Genome id to add to the list.")
+    genomes_import.add_argument("--label", default=None, help="Human-readable genome label.")
+    genomes_import.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Replace an existing FASTA for the same genome id.",
+    )
+    genomes_import.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Write a human summary or machine-readable JSON. Default: text.",
+    )
+
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
-    if argv and argv[0] not in {"design", "-h", "--help"}:
+    if argv and argv[0] not in {"design", "genomes", "-h", "--help"}:
         argv = ["design", *argv]
 
     parser = build_parser()
@@ -102,6 +152,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command is None:
         parser.print_help()
         return 0
+
+    if args.command == "genomes":
+        return _handle_genomes_command(args, parser)
 
     if args.command != "design":
         parser.error("Unsupported command.")
@@ -150,6 +203,36 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print(_format_text_summary(payload))
 
+    return 0
+
+
+def _handle_genomes_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
+    if args.genomes_command is None:
+        parser.error("genomes requires one of: list, download, import.")
+
+    try:
+        if args.genomes_command == "list":
+            payload = {"genomes": list_genomes()}
+        elif args.genomes_command == "download":
+            payload = download_genome_reference(args.genome, force=args.force)
+        elif args.genomes_command == "import":
+            payload = import_genome_reference(
+                args.fasta,
+                genome_id=args.genome_id,
+                label=args.label,
+                overwrite=args.overwrite,
+            )
+        else:
+            parser.error("Unsupported genomes command.")
+    except (ValueError, RuntimeError, OSError) as exc:
+        parser.error(str(exc))
+
+    if args.format == "json":
+        print(json.dumps(payload, indent=2))
+    elif args.genomes_command == "list":
+        print(_format_genome_catalog_rows(payload["genomes"]))
+    else:
+        print(payload.get("message") or payload.get("status") or "Done.")
     return 0
 
 
@@ -292,6 +375,17 @@ def _format_genome_rows(genome_result: dict) -> list[str]:
                 f"({location['strand']}) - {location.get('feature_summary', 'No annotation')}"
             )
     return rows
+
+
+def _format_genome_catalog_rows(genomes: list[dict]) -> str:
+    rows = ["Genome references:"]
+    for genome in genomes:
+        label = genome.get("label") or genome.get("id") or "Genome"
+        status = genome.get("status") or "missing"
+        detail = "available" if genome.get("available") else status
+        size = f" ({genome['size_label']})" if genome.get("size_label") else ""
+        rows.append(f"  - {genome.get('id')}: {label}{size} - {detail}")
+    return "\n".join(rows)
 
 
 def _format_model_rows(model_result: dict) -> list[str]:

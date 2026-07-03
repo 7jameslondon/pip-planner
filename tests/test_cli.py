@@ -154,6 +154,64 @@ class CliTests(unittest.TestCase):
             self.assertTrue(genome["locations_listed"])
             self.assertIn("GENE1", genome["locations"][0]["feature_summary"])
 
+    def test_cli_lists_public_genomes_without_hela(self) -> None:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pip_planner",
+                "genomes",
+                "list",
+                "--format",
+                "json",
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            timeout=20,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        payload = json.loads(completed.stdout)
+        genomes = {genome["id"]: genome for genome in payload["genomes"]}
+        self.assertIn("sacCer3", genomes)
+        self.assertIn("human-grch38", genomes)
+        self.assertNotIn("hela", genomes)
+        self.assertTrue(genomes["sacCer3"]["available"])
+
+    def test_cli_imports_custom_genome(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "custom.fa"
+            source.write_text(">chrCustom\nATGCATGC\n", encoding="utf-8")
+            env = os.environ.copy()
+            env["PIP_PLANNER_GENOME_DIR"] = str(root / "genomes")
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pip_planner",
+                    "genomes",
+                    "import",
+                    str(source),
+                    "--label",
+                    "Custom Genome",
+                    "--format",
+                    "json",
+                ],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                capture_output=True,
+                timeout=20,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            payload = json.loads(completed.stdout)
+            self.assertEqual(payload["status"], "imported")
+            self.assertEqual(payload["genome"]["id"], "custom-genome")
+
     def test_cli_can_generate_one_product_at_a_time(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             schematic = subprocess.run(

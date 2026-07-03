@@ -59,6 +59,12 @@ class WebApiTests(unittest.TestCase):
                 with request.urlopen(http_request, timeout=10) as response:
                     result = json.loads(response.read().decode("utf-8"))
 
+                with request.urlopen(f"http://127.0.0.1:{port}/api/genomes", timeout=10) as response:
+                    genomes_payload = json.loads(response.read().decode("utf-8"))
+                genome_ids = {genome["id"] for genome in genomes_payload["genomes"]}
+                self.assertIn("human-grch38", genome_ids)
+                self.assertNotIn("hela", genome_ids)
+
                 self.assertIn("-m", result["invoked_command"])
                 self.assertIn("--genome", result["invoked_command"])
                 self.assertEqual(result["design"]["architecture"], "linear")
@@ -139,6 +145,71 @@ class WebApiTests(unittest.TestCase):
                 self.assertEqual(chemical_result["run_id"], schematic_result["run_id"])
                 self.assertIn("<svg", chemical_result["chemical_svg"])
                 self.assertIn("chemical_svg_url", chemical_result["generated"])
+            finally:
+                server.terminate()
+                try:
+                    server.communicate(timeout=5)
+                except subprocess.TimeoutExpired:
+                    server.kill()
+                    server.communicate(timeout=5)
+
+    def test_web_api_downloads_and_imports_genomes_through_cli(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            port = _free_port()
+            env = os.environ.copy()
+            env["PIP_PLANNER_GENOME_DIR"] = str(tmp_path / "genomes")
+            server = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "pip_planner.web",
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    str(port),
+                    "--out",
+                    str(tmp_path / "out"),
+                ],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+            try:
+                _wait_for_url(f"http://127.0.0.1:{port}/")
+
+                download_request = request.Request(
+                    f"http://127.0.0.1:{port}/api/genomes/download",
+                    data=json.dumps({"genome": "sacCer3"}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with request.urlopen(download_request, timeout=10) as response:
+                    download_result = json.loads(response.read().decode("utf-8"))
+                self.assertIn(download_result["status"], {"already_available", "downloaded"})
+                self.assertEqual(download_result["genome"]["id"], "sacCer3")
+
+                import_request = request.Request(
+                    f"http://127.0.0.1:{port}/api/genomes/import",
+                    data=b">chrCustom\nATGCATGC\n",
+                    headers={
+                        "Content-Type": "application/octet-stream",
+                        "X-Genome-Filename": "custom.fa",
+                    },
+                    method="POST",
+                )
+                with request.urlopen(import_request, timeout=10) as response:
+                    import_result = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(import_result["status"], "imported")
+                self.assertEqual(import_result["genome"]["id"], "custom")
+
+                with request.urlopen(f"http://127.0.0.1:{port}/api/genomes", timeout=10) as response:
+                    genomes_payload = json.loads(response.read().decode("utf-8"))
+                genome_ids = {genome["id"] for genome in genomes_payload["genomes"]}
+                self.assertIn("custom", genome_ids)
+                self.assertNotIn("hela", genome_ids)
             finally:
                 server.terminate()
                 try:

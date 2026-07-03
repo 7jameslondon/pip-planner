@@ -4,12 +4,16 @@ from bisect import bisect_right
 from dataclasses import dataclass
 from functools import lru_cache
 import gzip
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import shutil
+import sys
 from typing import Iterable, Iterator, TextIO
 from urllib.parse import unquote
+from urllib.request import urlopen
 
 from .model import COMPLEMENT, normalize_dna
 
@@ -17,6 +21,71 @@ from .model import COMPLEMENT, normalize_dna
 GENOME_NONE_ID = "none"
 DEFAULT_LOCATION_THRESHOLD = 100
 DEFAULT_FEATURE_LIMIT = 8
+GENOME_MANIFEST_NAME = "genomes.json"
+
+
+@dataclass(frozen=True)
+class GenomeCatalogEntry:
+    id: str
+    label: str
+    fasta: str
+    download_url: str
+    size_label: str
+    source_url: str
+    notes: str = ""
+    sha256: str = ""
+    bundled: bool = False
+
+
+CATALOG_REFERENCES: tuple[GenomeCatalogEntry, ...] = (
+    GenomeCatalogEntry(
+        id="sacCer3",
+        label="Saccharomyces cerevisiae sacCer3",
+        fasta="sacCer3/genome.fa.gz",
+        download_url="https://hgdownload.soe.ucsc.edu/goldenPath/sacCer3/bigZips/sacCer3.fa.gz",
+        size_label="3.6 MB",
+        source_url="https://hgdownload.soe.ucsc.edu/goldenPath/sacCer3/bigZips/",
+        sha256="e3a70396853eff5a012077efbd06cb97d858e12349745d102e316bb8f620f266",
+        bundled=True,
+        notes="Bundled yeast reference genome for quick checks and testing.",
+    ),
+    GenomeCatalogEntry(
+        id="ce11",
+        label="Caenorhabditis elegans ce11",
+        fasta="ce11/genome.fa.gz",
+        download_url="https://hgdownload.soe.ucsc.edu/goldenPath/ce11/bigZips/ce11.fa.gz",
+        size_label="30 MB",
+        source_url="https://hgdownload.soe.ucsc.edu/goldenPath/ce11/bigZips/",
+        notes="Optional C. elegans model-organism reference.",
+    ),
+    GenomeCatalogEntry(
+        id="dm6",
+        label="Drosophila melanogaster dm6",
+        fasta="dm6/genome.fa.gz",
+        download_url="https://hgdownload.soe.ucsc.edu/goldenPath/dm6/bigZips/dm6.fa.gz",
+        size_label="43 MB",
+        source_url="https://hgdownload.soe.ucsc.edu/goldenPath/dm6/bigZips/",
+        notes="Optional D. melanogaster model-organism reference.",
+    ),
+    GenomeCatalogEntry(
+        id="human-grch38",
+        label="Human GRCh38/hg38",
+        fasta="human-grch38/genome.fa.gz",
+        download_url="https://hgdownload.soe.ucsc.edu/goldenPath/hg38/bigZips/hg38.fa.gz",
+        size_label="938 MB",
+        source_url="https://hgdownload.soe.ucsc.edu/goldenPath/hg38/bigZips/",
+        notes="Large optional human reference. Not bundled with the app.",
+    ),
+    GenomeCatalogEntry(
+        id="mouse-mm39",
+        label="Mouse GRCm39/mm39",
+        fasta="mouse-mm39/genome.fa.gz",
+        download_url="https://hgdownload.soe.ucsc.edu/goldenPath/mm39/bigZips/mm39.fa.gz",
+        size_label="830 MB",
+        source_url="https://hgdownload.soe.ucsc.edu/goldenPath/mm39/bigZips/",
+        notes="Large optional mouse reference. Not bundled with the app.",
+    ),
+)
 
 
 @dataclass(frozen=True)
@@ -26,19 +95,35 @@ class GenomeReference:
     fasta: Path | None
     annotations: tuple[Path, ...] = ()
     notes: str = ""
+    download_url: str = ""
+    sha256: str = ""
+    size_label: str = ""
+    source_url: str = ""
+    source: str = "local"
+    bundled: bool = False
 
     @property
     def available(self) -> bool:
         return self.fasta is not None and self.fasta.exists()
 
     def to_dict(self) -> dict:
+        status = "available" if self.available else "downloadable" if self.download_url else "missing"
         return {
             "id": self.id,
             "label": self.label,
             "available": self.available,
+            "status": status,
             "fasta": str(self.fasta) if self.fasta is not None else None,
+            "expected_fasta": str(self.fasta) if self.fasta is not None else None,
             "annotations": [str(path) for path in self.annotations],
             "notes": self.notes,
+            "download_url": self.download_url,
+            "downloadable": bool(self.download_url) and not self.available,
+            "sha256": self.sha256,
+            "size_label": self.size_label,
+            "source_url": self.source_url,
+            "source": self.source,
+            "bundled": self.bundled and self.available,
         }
 
 
@@ -101,13 +186,116 @@ def list_genomes(genome_root: str | Path | None = None) -> list[dict]:
 
 def list_genome_references(genome_root: str | Path | None = None) -> tuple[GenomeReference, ...]:
     root = _genome_root(genome_root)
-    manifest = root / "genomes.json"
+    include_bundled = genome_root is None
+    references = {reference.id: reference for reference in _catalog_references(root, include_bundled)}
+    manifest = root / GENOME_MANIFEST_NAME
     if manifest.exists():
         try:
-            return tuple(_references_from_manifest(root, manifest))
+            for reference in _references_from_manifest(root, manifest):
+                references[reference.id] = reference
         except (OSError, ValueError, json.JSONDecodeError):
-            return tuple(_default_references(root))
-    return tuple(_default_references(root))
+            pass
+    return tuple(references.values())
+
+
+def download_genome_reference(
+    genome_id: str,
+    *,
+    genome_root: str | Path | None = None,
+    force: bool = False,
+) -> dict:
+    root = _genome_root(genome_root)
+    references = {reference.id: reference for reference in list_genome_references(genome_root)}
+    reference = references.get(genome_id)
+    if reference is None:
+        raise ValueError(f"Unknown genome '{genome_id}'.")
+    if reference.available and not force:
+        return {
+            "status": "already_available",
+            "genome": reference.to_dict(),
+            "message": f"{reference.label} is already available.",
+        }
+    if not reference.download_url:
+        raise ValueError(f"{reference.label} does not have a configured download URL.")
+
+    entry = _catalog_entry(genome_id)
+    relative_fasta = entry.fasta if entry is not None else f"{genome_id}/genome.fa.gz"
+    destination = (root / relative_fasta).resolve()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(destination.name + ".download")
+
+    digest = hashlib.sha256()
+    try:
+        with urlopen(reference.download_url, timeout=60) as response, temporary.open("wb") as target:
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+                target.write(chunk)
+        actual_sha256 = digest.hexdigest()
+        if reference.sha256 and actual_sha256.lower() != reference.sha256.lower():
+            raise RuntimeError(
+                f"Downloaded {reference.label} but checksum did not match. "
+                f"Expected {reference.sha256}, got {actual_sha256}."
+            )
+        temporary.replace(destination)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+    refreshed = {reference.id: reference for reference in list_genome_references(genome_root)}[genome_id]
+    return {
+        "status": "downloaded",
+        "genome": refreshed.to_dict(),
+        "message": f"Downloaded {refreshed.label}.",
+    }
+
+
+def import_genome_reference(
+    source_path: str | Path,
+    *,
+    genome_id: str | None = None,
+    label: str | None = None,
+    genome_root: str | Path | None = None,
+    overwrite: bool = False,
+) -> dict:
+    source = Path(source_path).expanduser().resolve()
+    if not source.exists() or not source.is_file():
+        raise ValueError(f"Genome FASTA was not found: {source}")
+    if not _looks_like_fasta(source):
+        raise ValueError("Genome file must be .fa, .fasta, .fna, or a gzipped version of one of those formats.")
+
+    root = _genome_root(genome_root)
+    label = str(label or _label_from_fasta(source)).strip()
+    genome_id = _safe_genome_id(genome_id or label)
+    if genome_id == GENOME_NONE_ID:
+        raise ValueError("'none' is reserved and cannot be used as a genome id.")
+
+    entry = _catalog_entry(genome_id)
+    relative_fasta = entry.fasta if entry is not None else f"{genome_id}/{_imported_fasta_name(source)}"
+    destination = (root / relative_fasta).resolve()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists() and not overwrite:
+        raise ValueError(f"Genome '{genome_id}' already has a FASTA at {destination}.")
+
+    if source != destination:
+        shutil.copy2(source, destination)
+
+    manifest_entry = {
+        "id": genome_id,
+        "label": label,
+        "fasta": relative_fasta.replace("\\", "/"),
+        "notes": "User-imported local reference genome.",
+    }
+    _upsert_manifest_entry(root, manifest_entry)
+
+    refreshed = {reference.id: reference for reference in list_genome_references(genome_root)}[genome_id]
+    return {
+        "status": "imported",
+        "genome": refreshed.to_dict(),
+        "message": f"Imported {refreshed.label}.",
+    }
 
 
 def analyze_genome_occurrences(
@@ -230,24 +418,75 @@ def _genome_root(genome_root: str | Path | None = None) -> Path:
     configured = os.environ.get("PIP_PLANNER_GENOME_DIR")
     if configured:
         return Path(configured).expanduser().resolve()
+    if getattr(sys, "frozen", False):
+        return _user_data_genome_root()
     return (Path.cwd() / "data" / "genomes").resolve()
 
 
-def _default_references(root: Path) -> Iterable[GenomeReference]:
-    yield GenomeReference(
-        id="human-grch38",
-        label="Human GRCh38.p14",
-        fasta=_resolve_existing_path(root, "human-grch38/genome.fa"),
-        annotations=tuple(_resolve_existing_path(root, path) for path in ("human-grch38/annotations.gff3",)),
-        notes="GRCh38/hg38 reference genome. Optional annotations can include GENCODE GFF3/GTF and BED tracks.",
-    )
-    yield GenomeReference(
-        id="hela",
-        label="HeLa local reference",
-        fasta=_resolve_existing_path(root, "hela/genome.fa"),
-        annotations=tuple(_resolve_existing_path(root, path) for path in ("hela/annotations.gff3",)),
-        notes="User-provided HeLa FASTA or assembly. HeLa controlled-access datasets are not bundled.",
-    )
+def _user_data_genome_root() -> Path:
+    if os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA")
+        if base:
+            return (Path(base) / "PIP Planner" / "genomes").resolve()
+        return (Path.home() / "AppData" / "Local" / "PIP Planner" / "genomes").resolve()
+
+    base = os.environ.get("XDG_DATA_HOME")
+    if base:
+        return (Path(base) / "pip-planner" / "genomes").resolve()
+    return (Path.home() / ".local" / "share" / "pip-planner" / "genomes").resolve()
+
+
+def _bundled_genome_root() -> Path | None:
+    bases = []
+    frozen_base = getattr(sys, "_MEIPASS", None)
+    if frozen_base:
+        bases.append(Path(frozen_base))
+    bases.append(Path.cwd())
+    bases.append(Path(__file__).resolve().parents[1])
+
+    for base in bases:
+        candidate = (base / "data" / "genomes").resolve()
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _reference_roots(root: Path, include_bundled: bool) -> tuple[Path, ...]:
+    roots = [root]
+    bundled = _bundled_genome_root() if include_bundled else None
+    if bundled is not None and bundled not in roots:
+        roots.append(bundled)
+    return tuple(roots)
+
+
+def _catalog_references(root: Path, include_bundled: bool) -> Iterable[GenomeReference]:
+    roots = _reference_roots(root, include_bundled)
+    bundled_root = _bundled_genome_root()
+    for entry in CATALOG_REFERENCES:
+        fasta, source = _resolve_reference_path(roots, root, entry.fasta)
+        bundled = entry.bundled and fasta.exists() and bundled_root is not None and _is_within(fasta, bundled_root)
+        if bundled:
+            source = "bundled"
+        yield GenomeReference(
+            id=entry.id,
+            label=entry.label,
+            fasta=fasta,
+            annotations=(),
+            notes=entry.notes,
+            download_url=entry.download_url,
+            sha256=entry.sha256,
+            size_label=entry.size_label,
+            source_url=entry.source_url,
+            source=source,
+            bundled=bundled,
+        )
+
+
+def _catalog_entry(genome_id: str) -> GenomeCatalogEntry | None:
+    for entry in CATALOG_REFERENCES:
+        if entry.id == genome_id:
+            return entry
+    return None
 
 
 def _references_from_manifest(root: Path, manifest: Path) -> Iterable[GenomeReference]:
@@ -274,7 +513,30 @@ def _references_from_manifest(root: Path, manifest: Path) -> Iterable[GenomeRefe
             fasta=fasta,
             annotations=annotations,
             notes=str(entry.get("notes") or ""),
+            download_url=str(entry.get("download_url") or ""),
+            sha256=str(entry.get("sha256") or ""),
+            size_label=str(entry.get("size_label") or ""),
+            source_url=str(entry.get("source_url") or ""),
+            source="local",
         )
+
+
+def _resolve_reference_path(roots: tuple[Path, ...], primary_root: Path, relative: str) -> tuple[Path, str]:
+    fallback = _resolve_existing_path(primary_root, relative)
+    for index, root in enumerate(roots):
+        path = _resolve_existing_path(root, relative)
+        if path.exists():
+            source = "local" if index == 0 else "bundled"
+            return path, source
+    return fallback, "local"
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
 
 
 def _resolve_existing_path(root: Path, relative: str) -> Path:
@@ -296,6 +558,58 @@ def _resolve_existing_path(root: Path, relative: str) -> Path:
         if candidate.exists():
             return candidate.resolve()
     return path.resolve()
+
+
+def _looks_like_fasta(path: Path) -> bool:
+    suffixes = [suffix.lower() for suffix in path.suffixes]
+    if not suffixes:
+        return False
+    if suffixes[-1] == ".gz" and len(suffixes) >= 2:
+        return suffixes[-2] in {".fa", ".fasta", ".fna"}
+    return suffixes[-1] in {".fa", ".fasta", ".fna"}
+
+
+def _imported_fasta_name(path: Path) -> str:
+    return "genome.fa.gz" if path.suffix.lower() == ".gz" else "genome.fa"
+
+
+def _label_from_fasta(path: Path) -> str:
+    name = path.name
+    for suffix in (".fasta.gz", ".fna.gz", ".fa.gz", ".fasta", ".fna", ".fa"):
+        if name.lower().endswith(suffix):
+            return name[: -len(suffix)]
+    return path.stem
+
+
+def _safe_genome_id(raw_value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_-]+", "-", raw_value.strip()).strip("-").lower()
+    if not cleaned:
+        cleaned = "custom-genome"
+    if not cleaned[0].isalnum():
+        cleaned = f"genome-{cleaned}"
+    return cleaned
+
+
+def _upsert_manifest_entry(root: Path, entry: dict) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    manifest = root / GENOME_MANIFEST_NAME
+    entries: list[dict] = []
+    if manifest.exists():
+        raw_payload = json.loads(manifest.read_text(encoding="utf-8"))
+        raw_entries = raw_payload.get("genomes") if isinstance(raw_payload, dict) else raw_payload
+        if isinstance(raw_entries, list):
+            entries = [item for item in raw_entries if isinstance(item, dict)]
+
+    updated = False
+    for index, existing in enumerate(entries):
+        if str(existing.get("id")) == str(entry["id"]):
+            entries[index] = entry
+            updated = True
+            break
+    if not updated:
+        entries.append(entry)
+
+    manifest.write_text(json.dumps({"genomes": entries}, indent=2) + "\n", encoding="utf-8")
 
 
 def _open_text(path: Path) -> TextIO:

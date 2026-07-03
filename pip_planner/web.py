@@ -7,6 +7,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import time
 from urllib.parse import unquote, urlparse
 import uuid
@@ -165,6 +166,16 @@ HTML_PAGE = """<!doctype html>
       line-height: 1.45;
       margin: 0 0 14px;
     }
+    .output-titlebar {
+      align-items: center;
+      display: flex;
+      gap: 10px;
+      justify-content: space-between;
+      margin: 0 0 10px;
+    }
+    .output-titlebar .output-heading {
+      margin: 0;
+    }
     .output-table {
       width: 100%;
       border-collapse: collapse;
@@ -288,6 +299,68 @@ HTML_PAGE = """<!doctype html>
       color: var(--danger);
       border: 1px solid #efb3b3;
     }
+    .genome-actions {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      margin-top: 8px;
+      overflow: hidden;
+    }
+    .genome-item {
+      align-items: center;
+      background: #fff;
+      border-bottom: 1px solid var(--line);
+      display: grid;
+      gap: 8px;
+      grid-template-columns: minmax(0, 1fr) auto;
+      min-height: 42px;
+      padding: 8px 10px;
+    }
+    .genome-item:last-child { border-bottom: 0; }
+    .genome-name {
+      font-size: 13px;
+      font-weight: 700;
+      line-height: 1.25;
+      overflow-wrap: anywhere;
+    }
+    .genome-meta {
+      color: var(--muted);
+      display: block;
+      font-size: 11px;
+      font-weight: 400;
+      margin-top: 2px;
+    }
+    .genome-button {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      color: var(--blue);
+      cursor: pointer;
+      font: inherit;
+      font-size: 12px;
+      font-weight: 700;
+      min-height: 30px;
+      padding: 5px 9px;
+      white-space: nowrap;
+    }
+    .genome-button:hover { background: var(--blue-soft); border-color: #9fc0ea; }
+    .genome-button:disabled {
+      color: var(--muted);
+      cursor: default;
+      background: #f8fafc;
+    }
+    .genome-status {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.35;
+      margin-top: 8px;
+      min-height: 16px;
+    }
+    .genome-settings {
+      max-width: 760px;
+    }
+    .genome-settings select {
+      margin-bottom: 12px;
+    }
     .files {
       margin-top: 14px;
       color: var(--muted);
@@ -383,12 +456,8 @@ HTML_PAGE = """<!doctype html>
           </div>
         </div>
 
-        <label for="genome">Genome</label>
-        <select id="genome" name="genome">
-          <option value="none">Not searched</option>
-          <option value="human-grch38">Human GRCh38</option>
-          <option value="hela">HeLa</option>
-        </select>
+        <input id="genome" name="genome" type="hidden" value="sacCer3">
+        <input id="genome-file" type="file" accept=".fa,.fasta,.fna,.gz" hidden>
       </form>
 
       <div class="message warn" id="warnings"></div>
@@ -427,6 +496,8 @@ HTML_PAGE = """<!doctype html>
     const warnings = document.querySelector('#warnings');
     const errors = document.querySelector('#errors');
     const tabs = [...document.querySelectorAll('.tab')];
+    const genomeInput = document.querySelector('#genome');
+    const genomeFileInput = document.querySelector('#genome-file');
     let currentResult = null;
     let currentView = 'schematic';
     let designTimer = null;
@@ -436,6 +507,11 @@ HTML_PAGE = """<!doctype html>
     let previousResult = null;
     let activeDesignRequest = 0;
     let lastQueuedPayload = '';
+    let genomeCatalog = [];
+    let genomeBusy = false;
+    let genomeSettingsVisible = false;
+    let genomeStatusMessage = '';
+    let genomeStatusIsError = false;
     const productOrder = ['schematic', 'chemical', 'solubility', 'genome', 'model'];
     const loadingRevealDelayMs = 250;
 
@@ -488,7 +564,7 @@ HTML_PAGE = """<!doctype html>
     }
 
     function formatGenomeOccurrences(genomeResult) {
-      if (!genomeResult || genomeResult.status === 'skipped') return 'Not searched';
+      if (!genomeResult || genomeResult.status === 'skipped') return 'Genome search unavailable';
       if (genomeResult.status === 'missing_reference') return 'Reference missing';
       if (genomeResult.status !== 'ok') return genomeResult.status || 'Unavailable';
       const count = Number(genomeResult.total_occurrences);
@@ -651,22 +727,110 @@ HTML_PAGE = """<!doctype html>
       })[character]);
     }
 
-    async function loadGenomes() {
-      const genomeSelect = document.querySelector('#genome');
+    function genomeStatusLabel(genome) {
+      if (genome.available) return genome.bundled ? 'Bundled' : 'Available';
+      if (genome.downloadable) return 'Download ' + (genome.size_label || '');
+      return 'Missing';
+    }
+
+    function setGenomeStatus(text, isError = false) {
+      genomeStatusMessage = text || '';
+      genomeStatusIsError = Boolean(isError);
+      if (currentView === 'genome' && genomeSettingsVisible) renderPreview();
+    }
+
+    function renderGenomeActions() {
+      return genomeCatalog.map(genome => {
+        const button = genome.downloadable
+          ? '<button class="genome-button" type="button" data-download-genome="' + escapeHtml(genome.id) + '"' +
+            (genomeBusy ? ' disabled' : '') + '>Download</button>'
+          : '<button class="genome-button" type="button" disabled>' + escapeHtml(genomeStatusLabel(genome)) + '</button>';
+        const size = genome.size_label ? ' - ' + genome.size_label : '';
+        return '<div class="genome-item">' +
+          '<span class="genome-name">' + escapeHtml(genome.label) +
+          '<span class="genome-meta">' + escapeHtml(genomeStatusLabel(genome) + size) + '</span></span>' +
+          button +
+          '</div>';
+      }).join('');
+    }
+
+    function availableGenomeOptions() {
+      return genomeCatalog.filter(genome => genome.available);
+    }
+
+    function defaultGenomeId() {
+      const available = availableGenomeOptions();
+      if (available.some(genome => genome.id === 'sacCer3')) return 'sacCer3';
+      return available.length ? available[0].id : 'sacCer3';
+    }
+
+    async function loadGenomes(selectGenomeId = '') {
       try {
         const response = await fetch('/api/genomes');
         if (!response.ok) return;
         const payload = await response.json();
         if (!Array.isArray(payload.genomes)) return;
-        const selected = genomeSelect.value;
-        const options = [{ id: 'none', label: 'Not searched', available: true }].concat(payload.genomes);
-        genomeSelect.innerHTML = options.map(genome => {
-          const label = genome.label + (genome.available === false ? ' (missing data)' : '');
-          return '<option value="' + escapeHtml(genome.id) + '">' + escapeHtml(label) + '</option>';
-        }).join('');
-        genomeSelect.value = options.some(genome => genome.id === selected) ? selected : 'none';
+        genomeCatalog = payload.genomes;
+        const selected = selectGenomeId || genomeInput.value || defaultGenomeId();
+        const available = availableGenomeOptions();
+        genomeInput.value = available.some(genome => genome.id === selected) ? selected : defaultGenomeId();
+        if (currentView === 'genome') renderPreview();
       } catch (error) {
         return;
+      }
+    }
+
+    async function downloadGenome(genomeId) {
+      if (!genomeId || genomeBusy) return;
+      genomeBusy = true;
+      renderPreview();
+      setGenomeStatus('Downloading ' + genomeId + '...');
+      try {
+        const response = await fetch('/api/genomes/download', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ genome: genomeId })
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || 'Genome download failed.');
+        const downloadedId = result.genome && result.genome.id ? result.genome.id : genomeId;
+        await loadGenomes(downloadedId);
+        setGenomeStatus(result.message || 'Genome downloaded.');
+        scheduleDesign(0);
+      } catch (error) {
+        setGenomeStatus(error.message || String(error), true);
+      } finally {
+        genomeBusy = false;
+        renderPreview();
+      }
+    }
+
+    async function importGenomeFile(file) {
+      if (!file || genomeBusy) return;
+      genomeBusy = true;
+      renderPreview();
+      setGenomeStatus('Importing ' + file.name + '...');
+      try {
+        const response = await fetch('/api/genomes/import', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/octet-stream',
+            'X-Genome-Filename': encodeURIComponent(file.name)
+          },
+          body: file
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || 'Genome import failed.');
+        const genomeId = result.genome && result.genome.id ? result.genome.id : '';
+        await loadGenomes(genomeId);
+        setGenomeStatus(result.message || 'Genome imported.');
+        scheduleDesign(0);
+      } catch (error) {
+        setGenomeStatus(error.message || String(error), true);
+      } finally {
+        genomeBusy = false;
+        genomeFileInput.value = '';
+        renderPreview();
       }
     }
 
@@ -812,47 +976,86 @@ HTML_PAGE = """<!doctype html>
       }, allowPendingFallback);
     }
 
+    function renderGenomeTitlebar(settingsVisible) {
+      return '<div class="output-titlebar">' +
+        '<h2 class="output-heading">Genome search</h2>' +
+        '<button class="genome-button" type="button" data-genome-settings-toggle>' +
+        (settingsVisible ? 'Results' : '&#9881; Settings') +
+        '</button>' +
+        '</div>';
+    }
+
+    function renderGenomeSettings() {
+      const available = availableGenomeOptions();
+      const selected = available.some(genome => genome.id === genomeInput.value) ? genomeInput.value : defaultGenomeId();
+      const options = available.map(genome => {
+        return '<option value="' + escapeHtml(genome.id) + '"' +
+          (genome.id === selected ? ' selected' : '') + '>' +
+          escapeHtml(genome.label) +
+          '</option>';
+      }).join('');
+      const statusStyle = genomeStatusIsError ? ' style="color: var(--danger);"' : '';
+      return '<div class="output-panel genome-settings">' +
+        renderGenomeTitlebar(true) +
+        '<label for="genome-select">Genome</label>' +
+        '<select id="genome-select">' + options + '</select>' +
+        '<div class="genome-actions">' + renderGenomeActions() + '</div>' +
+        '<button class="genome-button" id="genome-import" type="button">Other...</button>' +
+        '<div class="genome-status" aria-live="polite"' + statusStyle + '>' +
+        escapeHtml(genomeStatusMessage) +
+        '</div>' +
+        '</div>';
+    }
+
+    function renderGenomeResult(genomeResult) {
+      const heading = renderGenomeTitlebar(false);
+      if (!genomeResult || genomeResult.status === 'skipped') {
+        return '<div class="output-panel">' + heading + '<div class="empty">Genome search is waiting for a reference.</div></div>';
+      }
+
+      if (genomeResult.status !== 'ok') {
+        return '<div class="output-panel">' + heading + '<div class="empty">' +
+          escapeHtml(genomeResult.message || 'Genome search is unavailable.') +
+          '</div></div>';
+      }
+
+      const summary = '<p class="output-summary">' + escapeHtml(formatGenomeOccurrences(genomeResult)) + '</p>';
+      const locations = Array.isArray(genomeResult.locations) ? genomeResult.locations : [];
+      if (!genomeResult.locations_listed || locations.length === 0) {
+        return '<div class="output-panel">' + heading + summary + '<div class="empty">' +
+          escapeHtml(genomeResult.message || 'No locations are listed.') +
+          '</div></div>';
+      }
+
+      const rows = locations.map(location => {
+        return '<tr>' +
+          '<td class="code">' + escapeHtml(location.contig) + '</td>' +
+          '<td class="code">' + escapeHtml(location.start) + '</td>' +
+          '<td class="code">' + escapeHtml(location.end) + '</td>' +
+          '<td class="code">' + escapeHtml(location.strand) + '</td>' +
+          '<td>' + escapeHtml(location.feature_summary || 'No annotation') + '</td>' +
+          '</tr>';
+      }).join('');
+
+      return '<div class="output-panel">' +
+        heading +
+        summary +
+        '<table class="output-table genome-table">' +
+        '<thead><tr><th>Contig</th><th>Start</th><th>End</th><th>Strand</th><th>Overlapping annotation</th></tr></thead>' +
+        '<tbody>' + rows + '</tbody>' +
+        '</table>' +
+        '</div>';
+    }
+
     function renderGenomePreview(result = currentResult, allowPendingFallback = true) {
-      return renderStructuredProductPreview(result, 'genome', 'Genome search', renderResult => {
-        const genomeResult = (renderResult.design || {}).genome_occurrences;
-        const heading = '<h2 class="output-heading">Genome search</h2>';
-        if (!genomeResult || genomeResult.status === 'skipped') {
-          return '<div class="output-panel">' + heading + '<div class="empty">Not searched.</div></div>';
-        }
-
-        if (genomeResult.status !== 'ok') {
-          return '<div class="output-panel">' + heading + '<div class="empty">' +
-            escapeHtml(genomeResult.message || 'Genome search is unavailable.') +
-            '</div></div>';
-        }
-
-        const summary = '<p class="output-summary">' + escapeHtml(formatGenomeOccurrences(genomeResult)) + '</p>';
-        const locations = Array.isArray(genomeResult.locations) ? genomeResult.locations : [];
-        if (!genomeResult.locations_listed || locations.length === 0) {
-          return '<div class="output-panel">' + heading + summary + '<div class="empty">' +
-            escapeHtml(genomeResult.message || 'No locations are listed.') +
-            '</div></div>';
-        }
-
-        const rows = locations.map(location => {
-          return '<tr>' +
-            '<td class="code">' + escapeHtml(location.contig) + '</td>' +
-            '<td class="code">' + escapeHtml(location.start) + '</td>' +
-            '<td class="code">' + escapeHtml(location.end) + '</td>' +
-            '<td class="code">' + escapeHtml(location.strand) + '</td>' +
-            '<td>' + escapeHtml(location.feature_summary || 'No annotation') + '</td>' +
-            '</tr>';
-        }).join('');
-
-        return '<div class="output-panel">' +
-          heading +
-          summary +
-          '<table class="output-table genome-table">' +
-          '<thead><tr><th>Contig</th><th>Start</th><th>End</th><th>Strand</th><th>Overlapping annotation</th></tr></thead>' +
-          '<tbody>' + rows + '</tbody>' +
-          '</table>' +
-          '</div>';
-      }, allowPendingFallback);
+      if (genomeSettingsVisible) return renderGenomeSettings();
+      const status = result.productStatus.genome;
+      if (status === 'done') return renderGenomeResult((result.design || {}).genome_occurrences);
+      if (status === 'error') {
+        return '<div class="output-panel">' + renderGenomeTitlebar(false) +
+          '<div class="empty">' + escapeHtml(result.productErrors.genome || 'Genome search failed.') + '</div></div>';
+      }
+      return renderPendingPreview('Genome search', allowPendingFallback);
     }
 
     function renderModelPreview(result = currentResult, allowPendingFallback = true) {
@@ -955,6 +1158,41 @@ HTML_PAGE = """<!doctype html>
     form.addEventListener('submit', design);
     form.addEventListener('input', () => scheduleDesign());
     form.addEventListener('change', () => scheduleDesign(0));
+    preview.addEventListener('click', event => {
+      const settingsToggle = event.target.closest('[data-genome-settings-toggle]');
+      if (settingsToggle) {
+        event.preventDefault();
+        genomeSettingsVisible = !genomeSettingsVisible;
+        renderPreview();
+        return;
+      }
+
+      const button = event.target.closest('[data-download-genome]');
+      if (button) {
+        event.preventDefault();
+        downloadGenome(button.dataset.downloadGenome);
+        return;
+      }
+
+      const importButton = event.target.closest('#genome-import');
+      if (importButton) {
+        event.preventDefault();
+        genomeFileInput.click();
+      }
+    });
+    preview.addEventListener('change', event => {
+      const select = event.target.closest('#genome-select');
+      if (!select) return;
+      genomeInput.value = select.value;
+      genomeSettingsVisible = false;
+      scheduleDesign(0);
+      renderPreview();
+    });
+    genomeFileInput.addEventListener('change', event => {
+      event.stopPropagation();
+      const file = genomeFileInput.files && genomeFileInput.files[0];
+      if (file) importGenomeFile(file);
+    });
     loadGenomes();
     design();
   </script>
@@ -991,6 +1229,31 @@ class PlannerRequestHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path == "/api/genomes/download":
+            try:
+                payload = self._read_json()
+                result = self._run_cli_genome_download(payload)
+            except ValueError as exc:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            except RuntimeError as exc:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            self._send_json(HTTPStatus.OK, result)
+            return
+
+        if parsed.path == "/api/genomes/import":
+            try:
+                result = self._run_cli_genome_import()
+            except ValueError as exc:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            except RuntimeError as exc:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            self._send_json(HTTPStatus.OK, result)
+            return
+
         if parsed.path not in {"/api/design", "/api/design/product"}:
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found."})
             return
@@ -1189,6 +1452,57 @@ class PlannerRequestHandler(BaseHTTPRequestHandler):
             result["chemical_svg"] = file_paths["chemical_svg"].read_text(encoding="utf-8")
 
         return result
+
+    def _run_cli_genome_download(self, payload: dict) -> dict:
+        genome = str(payload.get("genome", "")).strip()
+        if not genome:
+            raise ValueError("Genome id is required.")
+        return self._run_cli_json(["genomes", "download", genome, "--format", "json"], timeout=7200)
+
+    def _run_cli_genome_import(self) -> dict:
+        length = int(self.headers.get("Content-Length", "0"))
+        if length <= 0:
+            raise ValueError("Genome FASTA upload is required.")
+
+        raw_filename = unquote(self.headers.get("X-Genome-Filename", "genome.fa"))
+        filename = Path(raw_filename).name or "genome.fa"
+        if not filename.lower().endswith((".fa", ".fasta", ".fna", ".fa.gz", ".fasta.gz", ".fna.gz")):
+            raise ValueError("Genome file must be .fa, .fasta, .fna, or a gzipped version of one of those formats.")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            upload_path = Path(tmp) / filename
+            remaining = length
+            with upload_path.open("wb") as target:
+                while remaining > 0:
+                    chunk = self.rfile.read(min(1024 * 1024, remaining))
+                    if not chunk:
+                        raise ValueError("Genome FASTA upload ended early.")
+                    target.write(chunk)
+                    remaining -= len(chunk)
+            return self._run_cli_json(
+                ["genomes", "import", str(upload_path), "--format", "json"],
+                timeout=600,
+            )
+
+    def _run_cli_json(self, args: list[str], timeout: int) -> dict:
+        command = [*_cli_command_prefix(), *args]
+        completed = subprocess.run(
+            command,
+            cwd=str(self.project_root),
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+        )
+        if completed.returncode != 0:
+            error = completed.stderr.strip() or completed.stdout.strip() or "CLI command failed."
+            raise RuntimeError(error)
+        try:
+            payload = json.loads(completed.stdout)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"CLI returned invalid JSON: {exc.msg}.") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError("CLI returned an invalid JSON payload.")
+        return payload
 
     def _serve_generated(self, path: str) -> None:
         relative = unquote(path.removeprefix("/generated/"))

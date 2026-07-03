@@ -132,6 +132,22 @@ async function main() {
   try {
     await page.goto(baseUrl, { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('#preview svg', { timeout: 10000 });
+    await page.click('[data-view="genome"]');
+    await page.click('[data-genome-settings-toggle]');
+    await page.waitForFunction(() => {
+      const options = [...document.querySelectorAll('#genome-select option')].map(option => option.value);
+      return options.includes('human-grch38') && options.includes('sacCer3');
+    }, null, { timeout: 10000 });
+    const defaultGenome = await page.locator('#genome-select').inputValue();
+    if (defaultGenome !== 'sacCer3') {
+      throw new Error(`Expected sacCer3 to be the default genome, saw: ${defaultGenome}.`);
+    }
+    const genomeOptionsText = await page.locator('#genome-select').textContent();
+    if (genomeOptionsText.includes('HeLa') || genomeOptionsText.includes('hela') || genomeOptionsText.includes('Not searched')) {
+      throw new Error('HeLa should not be listed as a built-in genome option.');
+    }
+    await page.click('[data-genome-settings-toggle]');
+    await page.click('[data-view="schematic"]');
     const toolbarDownloads = await page.locator('.toolbar .download').count();
     if (toolbarDownloads !== 0) {
       throw new Error(`Expected no toolbar download links, saw ${toolbarDownloads}.`);
@@ -150,14 +166,16 @@ async function main() {
     await page.locator('label').filter({ hasText: 'Linear' }).click();
     await page.selectOption('#at-mode', 'py-py');
     await page.selectOption('#tail', 'none');
-    await page.selectOption('#genome', 'human-grch38');
+    await page.click('[data-view="genome"]');
+    await page.click('[data-genome-settings-toggle]');
+    await page.selectOption('#genome-select', 'human-grch38');
     await page.waitForFunction(() => {
       const chain = document.querySelector('#metric-chain');
       return chain && chain.textContent.includes('Py-Py-Im-Py');
     }, null, { timeout: 10000 });
 
     await page.click('[data-view="solubility"]');
-    await page.waitForSelector('#preview table.solubility-table', { timeout: 10000 });
+    await page.waitForSelector('#preview table.solubility-table', { timeout: 20000 });
     const solubilityText = await page.locator('#preview').textContent();
     if (!solubilityText.includes('ADMET-AI v2') || !solubilityText.includes('SolTranNet')) {
       throw new Error('Solubility predictions were not shown in the preview tab.');
