@@ -9,3 +9,5 @@ dist/
 release/
 *.egg-info/
 output/
+data/genomes/*/
+!data/genomes/sacCer3/

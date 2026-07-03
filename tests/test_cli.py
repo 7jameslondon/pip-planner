@@ -212,6 +212,58 @@ class CliTests(unittest.TestCase):
             self.assertEqual(payload["status"], "imported")
             self.assertEqual(payload["genome"]["id"], "custom-genome")
 
+    def test_cli_deletes_custom_genome(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "custom.fa"
+            source.write_text(">chrCustom\nATGCATGC\n", encoding="utf-8")
+            env = os.environ.copy()
+            env["PIP_PLANNER_GENOME_DIR"] = str(root / "genomes")
+
+            imported = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pip_planner",
+                    "genomes",
+                    "import",
+                    str(source),
+                    "--label",
+                    "Custom Genome",
+                    "--format",
+                    "json",
+                ],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                capture_output=True,
+                timeout=20,
+            )
+            self.assertEqual(imported.returncode, 0, imported.stderr)
+
+            deleted = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pip_planner",
+                    "genomes",
+                    "delete",
+                    "custom-genome",
+                    "--format",
+                    "json",
+                ],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                capture_output=True,
+                timeout=20,
+            )
+
+            self.assertEqual(deleted.returncode, 0, deleted.stderr)
+            payload = json.loads(deleted.stdout)
+            self.assertEqual(payload["status"], "deleted")
+            self.assertFalse((root / "genomes" / "custom-genome" / "genome.fa").exists())
+
     def test_cli_can_generate_one_product_at_a_time(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             schematic = subprocess.run(

@@ -135,16 +135,33 @@ async function main() {
     await page.click('[data-view="genome"]');
     await page.click('[data-genome-settings-toggle]');
     await page.waitForFunction(() => {
-      const options = [...document.querySelectorAll('#genome-select option')].map(option => option.value);
-      return options.includes('human-grch38') && options.includes('sacCer3');
+      return document.fonts && document.fonts.check('16px "Material Icons"');
     }, null, { timeout: 10000 });
-    const defaultGenome = await page.locator('#genome-select').inputValue();
+    await page.waitForFunction(() => {
+      return document.querySelector('[data-select-genome="human-grch38"]') &&
+        [...document.querySelectorAll('.genome-item')].some(item =>
+          item.textContent.includes('Saccharomyces cerevisiae sacCer3') &&
+          item.querySelector('.genome-button.is-selected')
+        );
+    }, null, { timeout: 10000 });
+    const defaultGenome = await page.locator('#genome').inputValue();
     if (defaultGenome !== 'sacCer3') {
       throw new Error(`Expected sacCer3 to be the default genome, saw: ${defaultGenome}.`);
     }
-    const genomeOptionsText = await page.locator('#genome-select').textContent();
+    const genomeOptionsText = await page.locator('.genome-actions').textContent();
     if (genomeOptionsText.includes('HeLa') || genomeOptionsText.includes('hela') || genomeOptionsText.includes('Not searched')) {
       throw new Error('HeLa should not be listed as a built-in genome option.');
+    }
+    if (!genomeOptionsText.includes('Selected') || !genomeOptionsText.includes('Select')) {
+      throw new Error('Genome settings should use Selected/Select buttons for available genomes.');
+    }
+    const settingsIcon = (await page.locator('[data-genome-settings-toggle] .material-icons').textContent()).trim();
+    if (settingsIcon !== 'table_rows') {
+      throw new Error(`Expected Material table_rows icon on genome results button, saw: ${settingsIcon}.`);
+    }
+    const deleteIcon = (await page.locator('[data-delete-genome="human-grch38"] .material-icons').textContent()).trim();
+    if (deleteIcon !== 'delete') {
+      throw new Error(`Expected Material delete icon for removable genomes, saw: ${deleteIcon}.`);
     }
     await page.click('[data-genome-settings-toggle]');
     await page.click('[data-view="schematic"]');
@@ -168,7 +185,7 @@ async function main() {
     await page.selectOption('#tail', 'none');
     await page.click('[data-view="genome"]');
     await page.click('[data-genome-settings-toggle]');
-    await page.selectOption('#genome-select', 'human-grch38');
+    await page.click('[data-select-genome="human-grch38"]');
     await page.waitForFunction(() => {
       const chain = document.querySelector('#metric-chain');
       return chain && chain.textContent.includes('Py-Py-Im-Py');

@@ -8,6 +8,7 @@ import sys
 from .genome import (
     GENOME_NONE_ID,
     analyze_genome_occurrences,
+    delete_genome_reference,
     download_genome_reference,
     import_genome_reference,
     list_genomes,
@@ -137,6 +138,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Write a human summary or machine-readable JSON. Default: text.",
     )
 
+    genomes_delete = genomes_subparsers.add_parser("delete", help="Delete a downloaded or imported genome reference.")
+    genomes_delete.add_argument("genome", help="Genome id to delete.")
+    genomes_delete.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Write a human summary or machine-readable JSON. Default: text.",
+    )
+
     return parser
 
 
@@ -208,7 +218,7 @@ def main(argv: list[str] | None = None) -> int:
 
 def _handle_genomes_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     if args.genomes_command is None:
-        parser.error("genomes requires one of: list, download, import.")
+        parser.error("genomes requires one of: list, download, import, delete.")
 
     try:
         if args.genomes_command == "list":
@@ -222,6 +232,8 @@ def _handle_genomes_command(args: argparse.Namespace, parser: argparse.ArgumentP
                 label=args.label,
                 overwrite=args.overwrite,
             )
+        elif args.genomes_command == "delete":
+            payload = delete_genome_reference(args.genome)
         else:
             parser.error("Unsupported genomes command.")
     except (ValueError, RuntimeError, OSError) as exc:

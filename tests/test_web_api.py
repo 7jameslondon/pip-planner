@@ -40,6 +40,14 @@ class WebApiTests(unittest.TestCase):
             )
             try:
                 _wait_for_url(f"http://127.0.0.1:{port}/")
+                with request.urlopen(
+                    f"http://127.0.0.1:{port}/assets/fonts/material-icons/material-icons.css",
+                    timeout=10,
+                ) as response:
+                    self.assertEqual(response.status, 200)
+                    self.assertIn("text/css", response.headers["Content-Type"])
+                    self.assertIn(b"Material Icons", response.read())
+
                 payload = json.dumps(
                     {
                         "sequence": "ATGC",
@@ -188,8 +196,13 @@ class WebApiTests(unittest.TestCase):
                 )
                 with request.urlopen(download_request, timeout=10) as response:
                     download_result = json.loads(response.read().decode("utf-8"))
-                self.assertIn(download_result["status"], {"already_available", "downloaded"})
-                self.assertEqual(download_result["genome"]["id"], "sacCer3")
+                self.assertEqual(download_result["status"], "running")
+                completed_download = _wait_for_download_job(
+                    f"http://127.0.0.1:{port}",
+                    download_result["job_id"],
+                )
+                self.assertIn(completed_download["status"], {"already_available", "complete"})
+                self.assertEqual(completed_download["genome"]["id"], "sacCer3")
 
                 import_request = request.Request(
                     f"http://127.0.0.1:{port}/api/genomes/import",
@@ -210,6 +223,21 @@ class WebApiTests(unittest.TestCase):
                 genome_ids = {genome["id"] for genome in genomes_payload["genomes"]}
                 self.assertIn("custom", genome_ids)
                 self.assertNotIn("hela", genome_ids)
+
+                delete_request = request.Request(
+                    f"http://127.0.0.1:{port}/api/genomes/delete",
+                    data=json.dumps({"genome": "custom"}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with request.urlopen(delete_request, timeout=10) as response:
+                    delete_result = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(delete_result["status"], "deleted")
+
+                with request.urlopen(f"http://127.0.0.1:{port}/api/genomes", timeout=10) as response:
+                    genomes_payload = json.loads(response.read().decode("utf-8"))
+                genome_ids = {genome["id"] for genome in genomes_payload["genomes"]}
+                self.assertNotIn("custom", genome_ids)
             finally:
                 server.terminate()
                 try:
@@ -237,6 +265,19 @@ def _wait_for_url(url: str, timeout: float = 10.0) -> None:
             last_error = exc
         time.sleep(0.1)
     raise AssertionError(f"Timed out waiting for {url}: {last_error}")
+
+
+def _wait_for_download_job(base_url: str, job_id: str, timeout: float = 10.0) -> dict:
+    deadline = time.time() + timeout
+    last_payload: dict | None = None
+    while time.time() < deadline:
+        with request.urlopen(f"{base_url}/api/genomes/downloads/{job_id}", timeout=2) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        last_payload = payload
+        if payload["status"] != "running":
+            return payload
+        time.sleep(0.1)
+    raise AssertionError(f"Timed out waiting for download job {job_id}: {last_payload}")
 
 
 if __name__ == "__main__":

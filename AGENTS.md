@@ -21,6 +21,7 @@ This project is a small, dependency-light Python application. Keep the CLI as th
 - SVG renderers live in `pip_planner/svg.py`.
 - CLI behavior lives in `pip_planner/cli.py`.
 - The local web UI lives in `pip_planner/web.py` and must call `python -m pip_planner design`.
+- The Google Material Icons font is bundled under `assets/fonts/material-icons/`; use it for UI icons when icons are needed.
 - The Electron desktop wrapper lives in `electron/` and must start `pip_planner.web` rather than reimplementing UI or design logic.
 - Build scripts live in `scripts/build_*.py`.
 - Generated artifacts belong under `output/`, `build/`, `dist/`, and `release/`, which are intentionally gitignored.

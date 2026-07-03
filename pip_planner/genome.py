@@ -11,9 +11,10 @@ from pathlib import Path
 import re
 import shutil
 import sys
+import time
 from typing import Iterable, Iterator, TextIO
 from urllib.parse import unquote
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 from .model import COMPLEMENT, normalize_dna
 
@@ -34,6 +35,7 @@ class GenomeCatalogEntry:
     source_url: str
     notes: str = ""
     sha256: str = ""
+    size_bytes: int = 0
     bundled: bool = False
 
 
@@ -44,6 +46,7 @@ CATALOG_REFERENCES: tuple[GenomeCatalogEntry, ...] = (
         fasta="sacCer3/genome.fa.gz",
         download_url="https://hgdownload.soe.ucsc.edu/goldenPath/sacCer3/bigZips/sacCer3.fa.gz",
         size_label="3.6 MB",
+        size_bytes=3820548,
         source_url="https://hgdownload.soe.ucsc.edu/goldenPath/sacCer3/bigZips/",
         sha256="e3a70396853eff5a012077efbd06cb97d858e12349745d102e316bb8f620f266",
         bundled=True,
@@ -55,6 +58,7 @@ CATALOG_REFERENCES: tuple[GenomeCatalogEntry, ...] = (
         fasta="ce11/genome.fa.gz",
         download_url="https://hgdownload.soe.ucsc.edu/goldenPath/ce11/bigZips/ce11.fa.gz",
         size_label="30 MB",
+        size_bytes=31816111,
         source_url="https://hgdownload.soe.ucsc.edu/goldenPath/ce11/bigZips/",
         notes="Optional C. elegans model-organism reference.",
     ),
@@ -64,6 +68,7 @@ CATALOG_REFERENCES: tuple[GenomeCatalogEntry, ...] = (
         fasta="dm6/genome.fa.gz",
         download_url="https://hgdownload.soe.ucsc.edu/goldenPath/dm6/bigZips/dm6.fa.gz",
         size_label="43 MB",
+        size_bytes=45153922,
         source_url="https://hgdownload.soe.ucsc.edu/goldenPath/dm6/bigZips/",
         notes="Optional D. melanogaster model-organism reference.",
     ),
@@ -73,6 +78,7 @@ CATALOG_REFERENCES: tuple[GenomeCatalogEntry, ...] = (
         fasta="human-grch38/genome.fa.gz",
         download_url="https://hgdownload.soe.ucsc.edu/goldenPath/hg38/bigZips/hg38.fa.gz",
         size_label="938 MB",
+        size_bytes=983659424,
         source_url="https://hgdownload.soe.ucsc.edu/goldenPath/hg38/bigZips/",
         notes="Large optional human reference. Not bundled with the app.",
     ),
@@ -82,6 +88,7 @@ CATALOG_REFERENCES: tuple[GenomeCatalogEntry, ...] = (
         fasta="mouse-mm39/genome.fa.gz",
         download_url="https://hgdownload.soe.ucsc.edu/goldenPath/mm39/bigZips/mm39.fa.gz",
         size_label="830 MB",
+        size_bytes=870543764,
         source_url="https://hgdownload.soe.ucsc.edu/goldenPath/mm39/bigZips/",
         notes="Large optional mouse reference. Not bundled with the app.",
     ),
@@ -98,6 +105,7 @@ class GenomeReference:
     download_url: str = ""
     sha256: str = ""
     size_label: str = ""
+    size_bytes: int = 0
     source_url: str = ""
     source: str = "local"
     bundled: bool = False
@@ -121,6 +129,7 @@ class GenomeReference:
             "downloadable": bool(self.download_url) and not self.available,
             "sha256": self.sha256,
             "size_label": self.size_label,
+            "size_bytes": self.size_bytes,
             "source_url": self.source_url,
             "source": self.source,
             "bundled": self.bundled and self.available,
@@ -224,24 +233,49 @@ def download_genome_reference(
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_name(destination.name + ".download")
 
+    if not force and _complete_temporary_download(temporary, reference):
+        _promote_download(temporary, destination)
+        refreshed = {reference.id: reference for reference in list_genome_references(genome_root)}[genome_id]
+        return {
+            "status": "downloaded",
+            "genome": refreshed.to_dict(),
+            "message": f"Finished installing {refreshed.label} from a completed download.",
+        }
+
     digest = hashlib.sha256()
-    try:
-        with urlopen(reference.download_url, timeout=60) as response, temporary.open("wb") as target:
+    remove_temporary = False
+    existing_size = _download_size(temporary)
+    request = _download_request(reference.download_url, existing_size, reference.size_bytes)
+    with urlopen(request, timeout=60) as response:
+        append_download = existing_size > 0 and getattr(response, "status", response.getcode()) == 206
+        if append_download:
+            _hash_file(temporary, digest)
+        else:
+            existing_size = 0
+        with temporary.open("ab" if append_download else "wb") as target:
             while True:
                 chunk = response.read(1024 * 1024)
                 if not chunk:
                     break
                 digest.update(chunk)
                 target.write(chunk)
+
+    try:
+        if reference.size_bytes and _download_size(temporary) != reference.size_bytes:
+            raise RuntimeError(
+                f"Downloaded {reference.label} but received {_download_size(temporary):,} bytes; "
+                f"expected {reference.size_bytes:,} bytes."
+            )
         actual_sha256 = digest.hexdigest()
         if reference.sha256 and actual_sha256.lower() != reference.sha256.lower():
+            remove_temporary = True
             raise RuntimeError(
                 f"Downloaded {reference.label} but checksum did not match. "
                 f"Expected {reference.sha256}, got {actual_sha256}."
             )
-        temporary.replace(destination)
+        _promote_download(temporary, destination)
     finally:
-        if temporary.exists():
+        if remove_temporary and temporary.exists():
             temporary.unlink()
 
     refreshed = {reference.id: reference for reference in list_genome_references(genome_root)}[genome_id]
@@ -295,6 +329,39 @@ def import_genome_reference(
         "status": "imported",
         "genome": refreshed.to_dict(),
         "message": f"Imported {refreshed.label}.",
+    }
+
+
+def delete_genome_reference(
+    genome_id: str,
+    *,
+    genome_root: str | Path | None = None,
+) -> dict:
+    root = _genome_root(genome_root)
+    references = {reference.id: reference for reference in list_genome_references(genome_root)}
+    reference = references.get(genome_id)
+    if reference is None:
+        raise ValueError(f"Unknown genome '{genome_id}'.")
+    if reference.bundled:
+        raise ValueError(f"{reference.label} is bundled with the app and cannot be deleted.")
+    if reference.fasta is None:
+        raise ValueError(f"{reference.label} does not have a local FASTA path.")
+
+    deleted_paths: list[str] = []
+    fasta = reference.fasta.resolve()
+    if fasta.exists():
+        if not _is_within(fasta, root):
+            raise ValueError(f"Refusing to delete a genome file outside the configured genome directory: {fasta}")
+        fasta.unlink()
+        deleted_paths.append(str(fasta))
+        _remove_empty_parents(fasta.parent, root)
+
+    _remove_manifest_entry(root, genome_id)
+    return {
+        "status": "deleted",
+        "genome_id": genome_id,
+        "message": f"Deleted {reference.label}.",
+        "deleted_paths": deleted_paths,
     }
 
 
@@ -476,6 +543,7 @@ def _catalog_references(root: Path, include_bundled: bool) -> Iterable[GenomeRef
             download_url=entry.download_url,
             sha256=entry.sha256,
             size_label=entry.size_label,
+            size_bytes=entry.size_bytes,
             source_url=entry.source_url,
             source=source,
             bundled=bundled,
@@ -487,6 +555,80 @@ def _catalog_entry(genome_id: str) -> GenomeCatalogEntry | None:
         if entry.id == genome_id:
             return entry
     return None
+
+
+def _download_request(url: str, existing_size: int, expected_size: int) -> Request:
+    headers = {}
+    if existing_size > 0 and expected_size > existing_size:
+        headers["Range"] = f"bytes={existing_size}-"
+    return Request(url, headers=headers)
+
+
+def _download_size(path: Path) -> int:
+    try:
+        return path.stat().st_size if path.exists() else 0
+    except OSError:
+        return 0
+
+
+def _complete_temporary_download(path: Path, reference: GenomeReference) -> bool:
+    if not path.exists():
+        return False
+    if not reference.size_bytes and not reference.sha256:
+        return False
+    if reference.size_bytes and _download_size(path) != reference.size_bytes:
+        return False
+    if reference.sha256:
+        digest = hashlib.sha256()
+        _hash_file(path, digest)
+        return digest.hexdigest().lower() == reference.sha256.lower()
+    return True
+
+
+def _hash_file(path: Path, digest: "hashlib._Hash") -> None:
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+
+
+def _promote_download(temporary: Path, destination: Path) -> None:
+    last_error: OSError | None = None
+    for attempt in range(8):
+        try:
+            temporary.replace(destination)
+            return
+        except OSError as exc:
+            last_error = exc
+            time.sleep(min(0.25 * (attempt + 1), 2.0))
+    fallback = destination.with_name(destination.name + ".promote")
+    for attempt in range(4):
+        try:
+            shutil.copy2(temporary, fallback)
+            if _download_size(fallback) != _download_size(temporary):
+                raise OSError(f"Copied download size did not match for {destination}.")
+            fallback.replace(destination)
+            _unlink_with_retries(temporary)
+            return
+        except OSError as exc:
+            last_error = exc
+            if fallback.exists():
+                _unlink_with_retries(fallback)
+            time.sleep(min(0.5 * (attempt + 1), 2.0))
+    assert last_error is not None
+    raise last_error
+
+
+def _unlink_with_retries(path: Path) -> None:
+    for attempt in range(4):
+        try:
+            if path.exists():
+                path.unlink()
+            return
+        except OSError:
+            time.sleep(min(0.25 * (attempt + 1), 1.0))
 
 
 def _references_from_manifest(root: Path, manifest: Path) -> Iterable[GenomeReference]:
@@ -516,6 +658,7 @@ def _references_from_manifest(root: Path, manifest: Path) -> Iterable[GenomeRefe
             download_url=str(entry.get("download_url") or ""),
             sha256=str(entry.get("sha256") or ""),
             size_label=str(entry.get("size_label") or ""),
+            size_bytes=int(entry.get("size_bytes") or 0),
             source_url=str(entry.get("source_url") or ""),
             source="local",
         )
@@ -610,6 +753,31 @@ def _upsert_manifest_entry(root: Path, entry: dict) -> None:
         entries.append(entry)
 
     manifest.write_text(json.dumps({"genomes": entries}, indent=2) + "\n", encoding="utf-8")
+
+
+def _remove_manifest_entry(root: Path, genome_id: str) -> None:
+    manifest = root / GENOME_MANIFEST_NAME
+    if not manifest.exists():
+        return
+    raw_payload = json.loads(manifest.read_text(encoding="utf-8"))
+    raw_entries = raw_payload.get("genomes") if isinstance(raw_payload, dict) else raw_payload
+    if not isinstance(raw_entries, list):
+        return
+    entries = [entry for entry in raw_entries if not (isinstance(entry, dict) and str(entry.get("id")) == genome_id)]
+    if len(entries) == len(raw_entries):
+        return
+    manifest.write_text(json.dumps({"genomes": entries}, indent=2) + "\n", encoding="utf-8")
+
+
+def _remove_empty_parents(path: Path, root: Path) -> None:
+    current = path.resolve()
+    root = root.resolve()
+    while current != root and _is_within(current, root):
+        try:
+            current.rmdir()
+        except OSError:
+            return
+        current = current.parent
 
 
 def _open_text(path: Path) -> TextIO:

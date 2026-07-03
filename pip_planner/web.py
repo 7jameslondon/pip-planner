@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from urllib.parse import unquote, urlparse
 import uuid
@@ -22,6 +23,7 @@ HTML_PAGE = """<!doctype html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/assets/fonts/material-icons/material-icons.css">
   <title>PIP Planner</title>
   <style>
     :root {
@@ -271,7 +273,6 @@ HTML_PAGE = """<!doctype html>
     .preview-download span {
       font-size: 22px;
       line-height: 1;
-      transform: translateY(-1px);
     }
     .model-frame {
       width: 100%;
@@ -311,7 +312,7 @@ HTML_PAGE = """<!doctype html>
       border-bottom: 1px solid var(--line);
       display: grid;
       gap: 8px;
-      grid-template-columns: minmax(0, 1fr) auto;
+      grid-template-columns: minmax(0, 1fr) auto auto;
       min-height: 42px;
       padding: 8px 10px;
     }
@@ -330,16 +331,22 @@ HTML_PAGE = """<!doctype html>
       margin-top: 2px;
     }
     .genome-button {
+      align-items: center;
       border: 1px solid var(--line);
       border-radius: 8px;
       background: #fff;
       color: var(--blue);
       cursor: pointer;
+      display: inline-flex;
       font: inherit;
       font-size: 12px;
       font-weight: 700;
+      gap: 4px;
+      justify-content: center;
       min-height: 30px;
       padding: 5px 9px;
+      position: relative;
+      overflow: hidden;
       white-space: nowrap;
     }
     .genome-button:hover { background: var(--blue-soft); border-color: #9fc0ea; }
@@ -347,6 +354,59 @@ HTML_PAGE = """<!doctype html>
       color: var(--muted);
       cursor: default;
       background: #f8fafc;
+    }
+    .genome-button.is-selected {
+      color: var(--green);
+      border-color: #9fc8bd;
+      background: #eef8f5;
+    }
+    .genome-button.is-downloading {
+      color: var(--blue);
+      border-color: #9fc0ea;
+      background: #fff;
+    }
+    .genome-button-fill {
+      background: var(--blue-soft);
+      bottom: 0;
+      display: block;
+      left: 0;
+      position: absolute;
+      top: 0;
+      width: 0;
+      z-index: 0;
+    }
+    .genome-button span:not(.genome-button-fill) {
+      position: relative;
+      z-index: 1;
+    }
+    .genome-button .material-icons {
+      font-size: 16px;
+    }
+    .icon-button {
+      align-items: center;
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      color: var(--muted);
+      cursor: pointer;
+      display: inline-flex;
+      height: 30px;
+      justify-content: center;
+      padding: 0;
+      width: 34px;
+    }
+    .icon-button:hover {
+      background: #fce8e8;
+      border-color: #efb3b3;
+      color: var(--danger);
+    }
+    .icon-button:disabled {
+      background: #f8fafc;
+      color: var(--muted);
+      cursor: default;
+    }
+    .icon-button .material-icons {
+      font-size: 18px;
     }
     .genome-status {
       color: var(--muted);
@@ -357,9 +417,6 @@ HTML_PAGE = """<!doctype html>
     }
     .genome-settings {
       max-width: 760px;
-    }
-    .genome-settings select {
-      margin-bottom: 12px;
     }
     .files {
       margin-top: 14px;
@@ -508,7 +565,8 @@ HTML_PAGE = """<!doctype html>
     let activeDesignRequest = 0;
     let lastQueuedPayload = '';
     let genomeCatalog = [];
-    let genomeBusy = false;
+    let genomeDownloads = {};
+    let genomeDownloadTimers = {};
     let genomeSettingsVisible = false;
     let genomeStatusMessage = '';
     let genomeStatusIsError = false;
@@ -727,29 +785,61 @@ HTML_PAGE = """<!doctype html>
       })[character]);
     }
 
-    function genomeStatusLabel(genome) {
-      if (genome.available) return genome.bundled ? 'Bundled' : 'Available';
-      if (genome.downloadable) return 'Download ' + (genome.size_label || '');
-      return 'Missing';
-    }
-
     function setGenomeStatus(text, isError = false) {
       genomeStatusMessage = text || '';
       genomeStatusIsError = Boolean(isError);
       if (currentView === 'genome' && genomeSettingsVisible) renderPreview();
     }
 
+    function formatDownloadEta(seconds) {
+      const numeric = Number(seconds);
+      if (!Number.isFinite(numeric) || numeric <= 0) return '';
+      const minutes = Math.max(1, Math.ceil(numeric / 60));
+      return minutes + ' min remaining';
+    }
+
+    function downloadProgressText(download) {
+      if (!download) return '';
+      const percent = Number(download.percent);
+      const percentText = Number.isFinite(percent) && percent > 0 ? Math.min(100, Math.floor(percent)) + '%' : '';
+      const etaText = formatDownloadEta(download.seconds_remaining);
+      return [percentText, etaText].filter(Boolean).join(' - ');
+    }
+
     function renderGenomeActions() {
       return genomeCatalog.map(genome => {
-        const button = genome.downloadable
-          ? '<button class="genome-button" type="button" data-download-genome="' + escapeHtml(genome.id) + '"' +
-            (genomeBusy ? ' disabled' : '') + '>Download</button>'
-          : '<button class="genome-button" type="button" disabled>' + escapeHtml(genomeStatusLabel(genome)) + '</button>';
-        const size = genome.size_label ? ' - ' + genome.size_label : '';
+        const isSelected = genome.available && genome.id === genomeInput.value;
+        const download = genomeDownloads[genome.id];
+        const isDownloading = download && download.status === 'running';
+        const progress = isDownloading ? Math.max(0, Math.min(100, Number(download.percent) || 0)) : 0;
+        let button = '';
+        if (genome.available) {
+          button = '<button class="genome-button' + (isSelected ? ' is-selected' : '') + '" type="button"' +
+            (isSelected ? ' disabled' : ' data-select-genome="' + escapeHtml(genome.id) + '"') +
+            '><span>' + (isSelected ? 'Selected' : 'Select') + '</span></button>';
+        } else if (genome.downloadable) {
+          button = '<button class="genome-button' + (isDownloading ? ' is-downloading' : '') + '" type="button" ' +
+            'data-download-genome="' + escapeHtml(genome.id) + '"' +
+            (isDownloading ? ' disabled' : '') + '>' +
+            (isDownloading ? '<span class="genome-button-fill" style="width: ' + progress.toFixed(1) + '%"></span>' : '') +
+            '<span>' +
+            (isDownloading ? 'Downloading...' : 'Download') +
+            '</span></button>';
+        } else {
+          button = '<button class="genome-button" type="button" disabled><span>Unavailable</span></button>';
+        }
+        const progressText = isDownloading ? downloadProgressText(download) : '';
+        const metaText = [genome.size_label, progressText].filter(Boolean).join(' - ');
+        const meta = metaText ? '<span class="genome-meta">' + escapeHtml(metaText) + '</span>' : '';
+        const deleteButton = genome.available && !genome.bundled
+          ? '<button class="icon-button" type="button" data-delete-genome="' + escapeHtml(genome.id) +
+            '" aria-label="Delete ' + escapeHtml(genome.label) + '" title="Delete ' + escapeHtml(genome.label) +
+            '"><span class="material-icons" aria-hidden="true">delete</span></button>'
+          : '<span></span>';
         return '<div class="genome-item">' +
-          '<span class="genome-name">' + escapeHtml(genome.label) +
-          '<span class="genome-meta">' + escapeHtml(genomeStatusLabel(genome) + size) + '</span></span>' +
+          '<span class="genome-name">' + escapeHtml(genome.label) + meta + '</span>' +
           button +
+          deleteButton +
           '</div>';
       }).join('');
     }
@@ -781,9 +871,7 @@ HTML_PAGE = """<!doctype html>
     }
 
     async function downloadGenome(genomeId) {
-      if (!genomeId || genomeBusy) return;
-      genomeBusy = true;
-      renderPreview();
+      if (!genomeId || (genomeDownloads[genomeId] && genomeDownloads[genomeId].status === 'running')) return;
       setGenomeStatus('Downloading ' + genomeId + '...');
       try {
         const response = await fetch('/api/genomes/download', {
@@ -793,21 +881,67 @@ HTML_PAGE = """<!doctype html>
         });
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || 'Genome download failed.');
-        const downloadedId = result.genome && result.genome.id ? result.genome.id : genomeId;
-        await loadGenomes(downloadedId);
-        setGenomeStatus(result.message || 'Genome downloaded.');
-        scheduleDesign(0);
+        genomeDownloads[genomeId] = result;
+        renderPreview();
+        pollGenomeDownload(genomeId, result.job_id);
       } catch (error) {
         setGenomeStatus(error.message || String(error), true);
-      } finally {
-        genomeBusy = false;
         renderPreview();
       }
     }
 
+    async function pollGenomeDownload(genomeId, jobId) {
+      if (!jobId) return;
+      if (genomeDownloadTimers[genomeId]) window.clearTimeout(genomeDownloadTimers[genomeId]);
+      try {
+        const response = await fetch('/api/genomes/downloads/' + encodeURIComponent(jobId));
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || 'Could not read download progress.');
+        genomeDownloads[genomeId] = result;
+        if (currentView === 'genome' && genomeSettingsVisible) renderPreview();
+        if (result.status === 'running') {
+          genomeDownloadTimers[genomeId] = window.setTimeout(() => pollGenomeDownload(genomeId, jobId), 750);
+          return;
+        }
+        delete genomeDownloadTimers[genomeId];
+        if (result.status === 'complete' || result.status === 'already_available') {
+          delete genomeDownloads[genomeId];
+          await loadGenomes();
+          setGenomeStatus(result.message || 'Genome downloaded.');
+          renderPreview();
+          return;
+        }
+        delete genomeDownloads[genomeId];
+        setGenomeStatus(result.message || 'Genome download failed.', true);
+      } catch (error) {
+        delete genomeDownloads[genomeId];
+        delete genomeDownloadTimers[genomeId];
+        setGenomeStatus(error.message || String(error), true);
+      }
+      renderPreview();
+    }
+
+    async function deleteGenome(genomeId) {
+      if (!genomeId) return;
+      try {
+        const response = await fetch('/api/genomes/delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ genome: genomeId })
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || 'Genome delete failed.');
+        await loadGenomes(genomeInput.value === genomeId ? '' : genomeInput.value);
+        setGenomeStatus(result.message || 'Genome deleted.');
+        scheduleDesign(0);
+      } catch (error) {
+        setGenomeStatus(error.message || String(error), true);
+      }
+      renderPreview();
+    }
+
     async function importGenomeFile(file) {
-      if (!file || genomeBusy) return;
-      genomeBusy = true;
+      if (!file) return;
       renderPreview();
       setGenomeStatus('Importing ' + file.name + '...');
       try {
@@ -828,7 +962,6 @@ HTML_PAGE = """<!doctype html>
       } catch (error) {
         setGenomeStatus(error.message || String(error), true);
       } finally {
-        genomeBusy = false;
         genomeFileInput.value = '';
         renderPreview();
       }
@@ -916,7 +1049,7 @@ HTML_PAGE = """<!doctype html>
       if (!download || !download.href) return '';
       return '<a class="preview-download" href="' + escapeHtml(download.href) + '" download="' +
         escapeHtml(download.name || '') + '" aria-label="' + escapeHtml(download.label) +
-        '" title="' + escapeHtml(download.label) + '"><span aria-hidden="true">&#8595;</span></a>';
+        '" title="' + escapeHtml(download.label) + '"><span class="material-icons" aria-hidden="true">download</span></a>';
     }
 
     function renderPendingPreview(label, allowPendingFallback) {
@@ -980,25 +1113,16 @@ HTML_PAGE = """<!doctype html>
       return '<div class="output-titlebar">' +
         '<h2 class="output-heading">Genome search</h2>' +
         '<button class="genome-button" type="button" data-genome-settings-toggle>' +
-        (settingsVisible ? 'Results' : '&#9881; Settings') +
+        '<span class="material-icons" aria-hidden="true">' + (settingsVisible ? 'table_rows' : 'settings') + '</span>' +
+        '<span>' + (settingsVisible ? 'Results' : 'Settings') + '</span>' +
         '</button>' +
         '</div>';
     }
 
     function renderGenomeSettings() {
-      const available = availableGenomeOptions();
-      const selected = available.some(genome => genome.id === genomeInput.value) ? genomeInput.value : defaultGenomeId();
-      const options = available.map(genome => {
-        return '<option value="' + escapeHtml(genome.id) + '"' +
-          (genome.id === selected ? ' selected' : '') + '>' +
-          escapeHtml(genome.label) +
-          '</option>';
-      }).join('');
       const statusStyle = genomeStatusIsError ? ' style="color: var(--danger);"' : '';
       return '<div class="output-panel genome-settings">' +
         renderGenomeTitlebar(true) +
-        '<label for="genome-select">Genome</label>' +
-        '<select id="genome-select">' + options + '</select>' +
         '<div class="genome-actions">' + renderGenomeActions() + '</div>' +
         '<button class="genome-button" id="genome-import" type="button">Other...</button>' +
         '<div class="genome-status" aria-live="polite"' + statusStyle + '>' +
@@ -1174,19 +1298,28 @@ HTML_PAGE = """<!doctype html>
         return;
       }
 
+      const selectButton = event.target.closest('[data-select-genome]');
+      if (selectButton) {
+        event.preventDefault();
+        genomeInput.value = selectButton.dataset.selectGenome;
+        genomeSettingsVisible = false;
+        scheduleDesign(0);
+        renderPreview();
+        return;
+      }
+
+      const deleteButton = event.target.closest('[data-delete-genome]');
+      if (deleteButton) {
+        event.preventDefault();
+        deleteGenome(deleteButton.dataset.deleteGenome);
+        return;
+      }
+
       const importButton = event.target.closest('#genome-import');
       if (importButton) {
         event.preventDefault();
         genomeFileInput.click();
       }
-    });
-    preview.addEventListener('change', event => {
-      const select = event.target.closest('#genome-select');
-      if (!select) return;
-      genomeInput.value = select.value;
-      genomeSettingsVisible = false;
-      scheduleDesign(0);
-      renderPreview();
     });
     genomeFileInput.addEventListener('change', event => {
       event.stopPropagation();
@@ -1204,6 +1337,8 @@ HTML_PAGE = """<!doctype html>
 class PlannerRequestHandler(BaseHTTPRequestHandler):
     output_root: Path
     project_root: Path
+    download_jobs: dict[str, dict] = {}
+    download_jobs_lock = threading.Lock()
 
     server_version = "PIPPlannerHTTP/0.1"
 
@@ -1221,6 +1356,18 @@ class PlannerRequestHandler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.OK, {"genomes": list_genomes()})
             return
 
+        if parsed.path.startswith("/api/genomes/downloads/"):
+            job_id = unquote(parsed.path.removeprefix("/api/genomes/downloads/"))
+            try:
+                self._send_json(HTTPStatus.OK, self._download_job_status(job_id))
+            except ValueError as exc:
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
+            return
+
+        if parsed.path.startswith("/assets/"):
+            self._serve_asset(parsed.path)
+            return
+
         if parsed.path.startswith("/generated/"):
             self._serve_generated(parsed.path)
             return
@@ -1232,7 +1379,20 @@ class PlannerRequestHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/genomes/download":
             try:
                 payload = self._read_json()
-                result = self._run_cli_genome_download(payload)
+                result = self._start_cli_genome_download(payload)
+            except ValueError as exc:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            except RuntimeError as exc:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            self._send_json(HTTPStatus.OK, result)
+            return
+
+        if parsed.path == "/api/genomes/delete":
+            try:
+                payload = self._read_json()
+                result = self._run_cli_genome_delete(payload)
             except ValueError as exc:
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                 return
@@ -1453,11 +1613,104 @@ class PlannerRequestHandler(BaseHTTPRequestHandler):
 
         return result
 
-    def _run_cli_genome_download(self, payload: dict) -> dict:
+    def _start_cli_genome_download(self, payload: dict) -> dict:
         genome = str(payload.get("genome", "")).strip()
         if not genome:
             raise ValueError("Genome id is required.")
-        return self._run_cli_json(["genomes", "download", genome, "--format", "json"], timeout=7200)
+        genome_info = _genome_info(genome)
+        if genome_info is None:
+            raise ValueError(f"Unknown genome '{genome}'.")
+
+        with self.download_jobs_lock:
+            for job_id, job in self.download_jobs.items():
+                if job.get("genome_id") == genome and job.get("process") is not None and job["process"].poll() is None:
+                    return self._download_job_status_unlocked(job_id)
+
+            job_id = uuid.uuid4().hex
+            command = [*_cli_command_prefix(), "genomes", "download", genome, "--format", "json"]
+            process = subprocess.Popen(
+                command,
+                cwd=str(self.project_root),
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            job = {
+                "job_id": job_id,
+                "genome_id": genome,
+                "label": genome_info.get("label") or genome,
+                "expected_fasta": genome_info.get("expected_fasta") or genome_info.get("fasta") or "",
+                "total_bytes": int(genome_info.get("size_bytes") or 0),
+                "started_at": time.time(),
+                "process": process,
+                "stdout": None,
+                "stderr": None,
+                "returncode": None,
+                "result": None,
+            }
+            self.download_jobs[job_id] = job
+            return self._download_job_status_unlocked(job_id)
+
+    def _download_job_status(self, job_id: str) -> dict:
+        with self.download_jobs_lock:
+            return self._download_job_status_unlocked(job_id)
+
+    def _download_job_status_unlocked(self, job_id: str) -> dict:
+        job = self.download_jobs.get(job_id)
+        if job is None:
+            raise ValueError("Download job was not found.")
+
+        process = job.get("process")
+        if process is not None and process.poll() is not None and job.get("returncode") is None:
+            stdout, stderr = process.communicate()
+            job["stdout"] = stdout
+            job["stderr"] = stderr
+            job["returncode"] = process.returncode
+            if process.returncode == 0:
+                try:
+                    job["result"] = json.loads(stdout)
+                except json.JSONDecodeError:
+                    job["result"] = {"status": "error", "message": "Download command returned invalid JSON."}
+
+        bytes_downloaded = _downloaded_bytes(str(job.get("expected_fasta") or ""))
+        total_bytes = int(job.get("total_bytes") or 0)
+        percent = (bytes_downloaded / total_bytes * 100) if total_bytes > 0 else 0
+        elapsed = max(0.001, time.time() - float(job.get("started_at") or time.time()))
+        rate = bytes_downloaded / elapsed if bytes_downloaded > 0 else 0
+        seconds_remaining = ((total_bytes - bytes_downloaded) / rate) if rate > 0 and total_bytes > bytes_downloaded else 0
+
+        base = {
+            "job_id": job_id,
+            "genome_id": job.get("genome_id"),
+            "label": job.get("label"),
+            "bytes_downloaded": bytes_downloaded,
+            "total_bytes": total_bytes,
+            "percent": max(0, min(100, percent)),
+            "seconds_remaining": seconds_remaining,
+        }
+
+        if job.get("returncode") is None:
+            return base | {"status": "running", "message": "Downloading..."}
+
+        if job.get("returncode") != 0:
+            message = (job.get("stderr") or job.get("stdout") or "Download command failed.").strip()
+            return base | {"status": "error", "message": message}
+
+        result = job.get("result") or {}
+        status = "already_available" if result.get("status") == "already_available" else "complete"
+        return base | {
+            "status": status,
+            "message": result.get("message") or "Genome downloaded.",
+            "genome": result.get("genome"),
+            "percent": 100,
+            "seconds_remaining": 0,
+        }
+
+    def _run_cli_genome_delete(self, payload: dict) -> dict:
+        genome = str(payload.get("genome", "")).strip()
+        if not genome:
+            raise ValueError("Genome id is required.")
+        return self._run_cli_json(["genomes", "delete", genome, "--format", "json"], timeout=120)
 
     def _run_cli_genome_import(self) -> dict:
         length = int(self.headers.get("Content-Length", "0"))
@@ -1531,6 +1784,28 @@ class PlannerRequestHandler(BaseHTTPRequestHandler):
         }
         content_type = content_types[candidate.suffix]
         self._send_bytes(HTTPStatus.OK, candidate.read_bytes(), content_type)
+
+    def _serve_asset(self, path: str) -> None:
+        relative = unquote(path.removeprefix("/assets/"))
+        if not relative:
+            self._send_json(HTTPStatus.NOT_FOUND, {"error": "Asset not found."})
+            return
+
+        candidate = (self.project_root / "assets" / relative).resolve()
+        try:
+            _assert_within(candidate, self.project_root / "assets")
+        except ValueError:
+            self._send_json(HTTPStatus.FORBIDDEN, {"error": "Asset path is not allowed."})
+            return
+        if not candidate.exists() or not candidate.is_file():
+            self._send_json(HTTPStatus.NOT_FOUND, {"error": "Asset not found."})
+            return
+        content_types = {
+            ".css": "text/css; charset=utf-8",
+            ".ttf": "font/ttf",
+            ".woff2": "font/woff2",
+        }
+        self._send_bytes(HTTPStatus.OK, candidate.read_bytes(), content_types.get(candidate.suffix, "application/octet-stream"))
 
     def _send_json(self, status: HTTPStatus, payload: dict) -> None:
         body = json.dumps(payload, indent=2).encode("utf-8")
@@ -1622,6 +1897,27 @@ def _collect_generated_file_paths(payload: dict, output_root: Path) -> dict[str,
         if path.exists():
             collected[key] = path
     return collected
+
+
+def _genome_info(genome_id: str) -> dict | None:
+    for genome in list_genomes():
+        if str(genome.get("id")) == genome_id:
+            return genome
+    return None
+
+
+def _downloaded_bytes(expected_fasta: str) -> int:
+    if not expected_fasta:
+        return 0
+    final_path = Path(expected_fasta)
+    download_path = final_path.with_name(final_path.name + ".download")
+    for path in (download_path, final_path):
+        try:
+            if path.exists():
+                return path.stat().st_size
+        except OSError:
+            continue
+    return 0
 
 
 def _assert_within(path: Path, root: Path) -> None:

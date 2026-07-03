@@ -95,10 +95,14 @@ def _solubility_package_args() -> list[str]:
 
 
 def _data_file_args() -> list[str]:
-    genome_data = ROOT / "data" / "genomes"
-    if not genome_data.exists():
-        return []
-    return ["--add-data", f"{genome_data}{os.pathsep}data/genomes"]
+    args: list[str] = []
+    bundled_saccer3 = ROOT / "data" / "genomes" / "sacCer3"
+    if bundled_saccer3.exists():
+        args.extend(["--add-data", f"{bundled_saccer3}{os.pathsep}data/genomes/sacCer3"])
+    material_icons = ROOT / "assets" / "fonts" / "material-icons"
+    if material_icons.exists():
+        args.extend(["--add-data", f"{material_icons}{os.pathsep}assets/fonts/material-icons"])
+    return args
 
 
 def _remove_within_workspace(path: Path) -> None:
