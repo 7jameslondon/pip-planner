@@ -59,7 +59,7 @@ def render_schematic_svg(design: PolyamideDesign) -> str:
     else:
         parts.append(_linear_polyamide_symbols(design, start_x, gap, y_top_dna, y_bottom_dna))
 
-    parts.append(_schematic_legend((width - 520) / 2, legend_y))
+    parts.append(_schematic_legend((width - 562) / 2, legend_y))
     parts.append("</g>")
 
     parts.append("</svg>")
@@ -82,9 +82,10 @@ def write_design_files(
     chemical_path = out_path / f"{safe_name}-chemical.svg"
     json_path = out_path / f"{safe_name}-design.json"
 
-    schematic_path.write_text(render_schematic_svg(design), encoding="utf-8")
-    chemical_rendering = render_rdkit_chemical_svg(design)
-    chemical_path.write_text(chemical_rendering.svg, encoding="utf-8")
+    schematic_files = write_schematic_file(design, out_path, safe_name)
+    schematic_path = schematic_files["schematic_svg"]
+    chemical_files, chemical_rendering = write_chemical_file(design, out_path, safe_name)
+    chemical_path = chemical_files["chemical_svg"]
     model_payload = write_molecular_model_files(
         design,
         out_path,
@@ -113,6 +114,33 @@ def write_design_files(
         "chemical_svg": chemical_path,
         "json": json_path,
     }
+
+
+def write_schematic_file(design: PolyamideDesign, out_dir: str | Path, name: str) -> dict[str, Path]:
+    out_path = ensure_output_dir(out_dir)
+    safe_name = _safe_filename(name)
+    schematic_path = out_path / f"{safe_name}-schematic.svg"
+    schematic_path.write_text(render_schematic_svg(design), encoding="utf-8")
+    return {"schematic_svg": schematic_path}
+
+
+def write_chemical_file(design: PolyamideDesign, out_dir: str | Path, name: str):
+    out_path = ensure_output_dir(out_dir)
+    safe_name = _safe_filename(name)
+    chemical_path = out_path / f"{safe_name}-chemical.svg"
+    chemical_rendering = render_rdkit_chemical_svg(design)
+    chemical_path.write_text(chemical_rendering.svg, encoding="utf-8")
+    return {"chemical_svg": chemical_path}, chemical_rendering
+
+
+def chemical_rendering_for_design(design: PolyamideDesign):
+    return render_rdkit_chemical_svg(design)
+
+
+def write_model_files(design: PolyamideDesign, out_dir: str | Path, name: str, chemical_smiles: str) -> dict:
+    out_path = ensure_output_dir(out_dir)
+    safe_name = _safe_filename(name)
+    return write_molecular_model_files(design, out_path, safe_name, chemical_smiles)
 
 
 def _svg_header(width: int, height: int, title: str) -> str:
@@ -164,22 +192,24 @@ def _schematic_horizontal_bounds(count: int, gap: float, is_hairpin: bool, tail:
 
 
 def _schematic_legend(x: float, y: float) -> str:
-    rows = [
-        ("Im", "Im"),
-        ("Py", "Py"),
-        ("β", "beta"),
-        ("Hp", "Hp"),
+    items = [
+        ("Im", "Im", 92, 160),
+        ("Py", "Py", 92, 160),
+        ("β", "beta", 72, 132),
+        ("Hp", "Hp", 92, 0),
     ]
     parts = [
         '<g class="schematic-legend" data-legend="polyamide-symbols">',
     ]
-    row_y = y
-    for index, (label, monomer) in enumerate(rows):
-        current_x = x + index * 132
-        equals_x = current_x + 50
-        parts.append(_text_end(equals_x - 12, row_y + 8, label, "legend-label ink"))
-        parts.append(_text_center(equals_x, row_y + 8, "=", "legend-label ink"))
-        parts.append(_monomer_symbol(monomer, equals_x + 56, row_y, 16))
+    current_x = x
+    for label, monomer, symbol_x, advance in items:
+        parts.append(
+            f'<g class="legend-item" data-legend-item="{escape(label)}" transform="translate({current_x:.1f},{y:.1f})">'
+        )
+        parts.append(_text(0, 8, f"{label} =", "legend-label ink"))
+        parts.append(_monomer_symbol(monomer, symbol_x, 0, 16))
+        parts.append("</g>")
+        current_x += advance
     parts.append("</g>")
     return "\n".join(parts)
 

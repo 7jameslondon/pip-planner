@@ -9,7 +9,22 @@ function projectRoot() {
 }
 
 function pythonExecutable() {
-  return process.env.PIP_PLANNER_PYTHON || 'python';
+  if (process.env.PIP_PLANNER_PYTHON) return process.env.PIP_PLANNER_PYTHON;
+
+  const root = projectRoot();
+  const userProfile = process.env.USERPROFILE || '';
+  const localAppData = process.env.LOCALAPPDATA || '';
+  const candidates = [
+    path.join(root, '.venv', 'Scripts', 'python.exe'),
+    path.join(root, 'venv', 'Scripts', 'python.exe'),
+    path.join(userProfile, 'miniconda3', 'python.exe'),
+    path.join(userProfile, 'anaconda3', 'python.exe'),
+    path.join(localAppData, 'Programs', 'Python', 'Python312', 'python.exe'),
+    path.join(localAppData, 'Programs', 'Python', 'Python311', 'python.exe'),
+    path.join(localAppData, 'Programs', 'Python', 'Python310', 'python.exe')
+  ];
+  const found = candidates.find(candidate => candidate && fs.existsSync(candidate));
+  return found || 'python';
 }
 
 function packagedBackendExecutable() {
@@ -120,12 +135,23 @@ async function startPlannerServer(options = {}) {
   child.stderr.on('data', chunk => {
     output += chunk.toString();
   });
+  child.on('error', error => {
+    output += `Could not start backend process '${executable}': ${error.message}\n`;
+  });
 
   const url = `http://${host}:${port}/`;
 
   try {
     await Promise.race([
       waitForUrl(url, options.timeoutMs || 15000),
+      new Promise((_, reject) => {
+        child.once('error', error => {
+          reject(new Error(
+            `Could not start the PIP Planner backend with '${executable}'. ` +
+            `Set PIP_PLANNER_PYTHON to a Python executable or run pnpm dev:launcher again. ${error.message}`
+          ));
+        });
+      }),
       new Promise((_, reject) => {
         child.once('exit', code => {
           reject(new Error(`PIP Planner server exited before startup with code ${code}. ${output}`));

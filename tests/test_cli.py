@@ -60,6 +60,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("PIP schematic", schematic_svg)
             self.assertIn('data-schematic="polyamide-figure"', schematic_svg)
             self.assertIn('data-legend="polyamide-symbols"', schematic_svg)
+            self.assertEqual(schematic_svg.count('class="legend-item"'), 4)
             self.assertIn('class="monomer im-symbol"', schematic_svg)
             self.assertIn('class="monomer py-symbol"', schematic_svg)
             self.assertIn('class="monomer hp-symbol"', schematic_svg)
@@ -152,6 +153,58 @@ class CliTests(unittest.TestCase):
             self.assertEqual(genome["total_occurrences"], 2)
             self.assertTrue(genome["locations_listed"])
             self.assertIn("GENE1", genome["locations"][0]["feature_summary"])
+
+    def test_cli_can_generate_one_product_at_a_time(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            schematic = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pip_planner",
+                    "design",
+                    "ATGC",
+                    "--out",
+                    tmp,
+                    "--format",
+                    "json",
+                    "--product",
+                    "schematic",
+                ],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                timeout=20,
+            )
+            self.assertEqual(schematic.returncode, 0, schematic.stderr)
+            schematic_payload = json.loads(schematic.stdout)
+            self.assertEqual(schematic_payload["product"], "schematic")
+            self.assertIn("schematic_svg", schematic_payload["files"])
+            self.assertNotIn("chemical_svg", schematic_payload["files"])
+
+            chemical = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pip_planner",
+                    "design",
+                    "ATGC",
+                    "--out",
+                    tmp,
+                    "--format",
+                    "json",
+                    "--product",
+                    "chemical",
+                ],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                timeout=20,
+            )
+            self.assertEqual(chemical.returncode, 0, chemical.stderr)
+            chemical_payload = json.loads(chemical.stdout)
+            self.assertEqual(chemical_payload["product"], "chemical")
+            self.assertIn("chemical_svg", chemical_payload["files"])
+            self.assertIn("chemical_smiles", chemical_payload)
 
 
 if __name__ == "__main__":

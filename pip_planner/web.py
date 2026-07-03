@@ -210,7 +210,7 @@ HTML_PAGE = """<!doctype html>
       align-items: center;
       margin: 0 0 12px;
     }
-    .tab, .download {
+    .tab {
       border: 1px solid var(--line);
       border-radius: 8px;
       background: #fff;
@@ -227,14 +227,6 @@ HTML_PAGE = """<!doctype html>
       border-color: #9fc0ea;
       font-weight: 700;
     }
-    .download {
-      margin-left: auto;
-      color: var(--blue);
-      font-weight: 700;
-    }
-    .download.secondary {
-      margin-left: 0;
-    }
     .preview {
       border: 1px solid var(--line);
       border-radius: 8px;
@@ -242,11 +234,37 @@ HTML_PAGE = """<!doctype html>
       min-height: 520px;
       overflow: auto;
       padding: 18px;
+      position: relative;
     }
     .preview svg {
       max-width: 100%;
       height: auto;
       display: block;
+    }
+    .preview-download {
+      align-items: center;
+      background: rgba(255, 255, 255, 0.94);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      color: var(--blue);
+      display: inline-flex;
+      height: 36px;
+      justify-content: center;
+      position: absolute;
+      right: 12px;
+      top: 12px;
+      text-decoration: none;
+      width: 36px;
+      z-index: 2;
+    }
+    .preview-download:hover {
+      background: var(--blue-soft);
+      border-color: #9fc0ea;
+    }
+    .preview-download span {
+      font-size: 22px;
+      line-height: 1;
+      transform: translateY(-1px);
     }
     .model-frame {
       width: 100%;
@@ -286,18 +304,44 @@ HTML_PAGE = """<!doctype html>
       padding: 28px;
       text-align: center;
     }
+    .loading {
+      display: grid;
+      place-items: center;
+      min-height: 240px;
+      gap: 12px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .spinner {
+      width: 24px;
+      height: 24px;
+      border: 3px solid #d7dee8;
+      border-top-color: var(--blue);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    .metric-spinner {
+      display: inline-block;
+      width: 15px;
+      height: 15px;
+      border: 2px solid #d7dee8;
+      border-top-color: var(--blue);
+      border-radius: 50%;
+      vertical-align: -2px;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
     @media (max-width: 880px) {
       .app { grid-template-columns: 1fr; }
       aside { border-right: 0; border-bottom: 1px solid var(--line); }
       main { padding: 18px; }
       .summary { grid-template-columns: 1fr 1fr; }
-      .download { margin-left: 0; }
     }
     @media (max-width: 540px) {
       aside { padding: 18px; }
       .row, .summary { grid-template-columns: 1fr; }
       .toolbar { align-items: stretch; }
-      .tab, .download { width: 100%; text-align: center; }
+      .tab { width: 100%; text-align: center; }
     }
   </style>
 </head>
@@ -369,12 +413,9 @@ HTML_PAGE = """<!doctype html>
       <section class="genome-panel" id="genome-panel" aria-label="Genome occurrence locations"></section>
 
       <div class="toolbar">
-        <button class="tab" type="button" data-view="chemical" aria-selected="true">Chemical structure</button>
-        <button class="tab" type="button" data-view="schematic" aria-selected="false">Schematic</button>
+        <button class="tab" type="button" data-view="schematic" aria-selected="true">Schematic</button>
+        <button class="tab" type="button" data-view="chemical" aria-selected="false">Chemical structure</button>
         <button class="tab" type="button" data-view="model" aria-selected="false">3D model</button>
-        <a class="download" id="download-chemical" href="#" download>Download chemical SVG</a>
-        <a class="download secondary" id="download-schematic" href="#" download>Download schematic SVG</a>
-        <a class="download secondary" id="download-model" href="#" download>Download PDB</a>
       </div>
 
       <section class="preview" id="preview" aria-live="polite">
@@ -394,10 +435,11 @@ HTML_PAGE = """<!doctype html>
     const errors = document.querySelector('#errors');
     const tabs = [...document.querySelectorAll('.tab')];
     let currentResult = null;
-    let currentView = 'chemical';
+    let currentView = 'schematic';
     let designTimer = null;
     let activeDesignRequest = 0;
     let lastQueuedPayload = '';
+    const productOrder = ['schematic', 'chemical', 'solubility', 'genome', 'model'];
 
     function payloadFromForm() {
       const data = new FormData(form);
@@ -429,6 +471,22 @@ HTML_PAGE = """<!doctype html>
     function showMessage(element, text) {
       element.textContent = text || '';
       element.classList.toggle('is-visible', Boolean(text));
+    }
+
+    function loadingMarkup(label = 'Loading') {
+      return '<div class="loading"><div class="spinner"></div><div>' + escapeHtml(label) + '</div></div>';
+    }
+
+    function metricLoadingMarkup() {
+      return '<span class="metric-spinner" aria-label="Loading"></span>';
+    }
+
+    function setMetric(selector, value) {
+      document.querySelector(selector).textContent = value;
+    }
+
+    function setMetricLoading(selector) {
+      document.querySelector(selector).innerHTML = metricLoadingMarkup();
     }
 
     function formatSolubility(predictions) {
@@ -463,6 +521,74 @@ HTML_PAGE = """<!doctype html>
       const atoms = Number(modelResult.atom_count);
       const countText = Number.isFinite(atoms) ? atoms.toLocaleString() + ' atoms' : 'model generated';
       return status + ' | ' + countText;
+    }
+
+    function resetProductState() {
+      currentResult = {
+        design: null,
+        run_id: null,
+        generated: {},
+        productStatus: {
+          schematic: 'loading',
+          chemical: 'waiting',
+          solubility: 'waiting',
+          genome: 'waiting',
+          model: 'waiting'
+        },
+        productErrors: {},
+        schematic_svg: '',
+        chemical_svg: ''
+      };
+      setMetricLoading('#metric-target');
+      setMetricLoading('#metric-complement');
+      setMetricLoading('#metric-pairs');
+      setMetricLoading('#metric-chain');
+      setMetricLoading('#metric-solubility');
+      setMetricLoading('#metric-genome');
+      setMetricLoading('#metric-model');
+      renderGenomePanel(null);
+      showMessage(warnings, '');
+      showMessage(errors, '');
+      document.querySelector('#files').textContent = '';
+      renderPreview();
+    }
+
+    function setProductLoading(product) {
+      if (!currentResult) return;
+      currentResult.productStatus[product] = 'loading';
+      delete currentResult.productErrors[product];
+      renderState();
+    }
+
+    function setProductError(product, error) {
+      if (!currentResult) return;
+      currentResult.productStatus[product] = 'error';
+      currentResult.productErrors[product] = error.message || String(error);
+      renderState();
+    }
+
+    function mergeProductResult(product, result) {
+      if (!currentResult) return;
+      const incomingDesign = result.design || {};
+      const currentDesign = currentResult.design || {};
+      currentResult.design = {
+        ...currentDesign,
+        ...incomingDesign,
+        files: {
+          ...(currentDesign.files || {}),
+          ...(incomingDesign.files || {})
+        }
+      };
+      currentResult.generated = {
+        ...currentResult.generated,
+        ...(result.generated || {})
+      };
+      currentResult.run_id = result.run_id || currentResult.run_id;
+      if (result.schematic_svg) currentResult.schematic_svg = result.schematic_svg;
+      if (result.chemical_svg) currentResult.chemical_svg = result.chemical_svg;
+      currentResult.productStatus[product] = 'done';
+      delete currentResult.productErrors[product];
+      renderState();
     }
 
     function renderGenomePanel(genomeResult) {
@@ -530,47 +656,104 @@ HTML_PAGE = """<!doctype html>
       }
     }
 
-    function renderResult(result) {
-      currentResult = result;
-      const design = result.design;
-      document.querySelector('#metric-target').textContent = design.sequence_label;
-      document.querySelector('#metric-complement').textContent = design.complement_label;
-      document.querySelector('#metric-pairs').textContent = design.recognition_pairs.join(' ');
-      document.querySelector('#metric-chain').textContent = design.chain_code;
-      document.querySelector('#metric-solubility').textContent = formatSolubility(design.solubility_predictions);
-      document.querySelector('#metric-genome').textContent = formatGenomeOccurrences(design.genome_occurrences);
-      document.querySelector('#metric-model').textContent = formatModelStatus(design.model_3d);
-      renderGenomePanel(design.genome_occurrences);
-      showMessage(warnings, design.warnings.join(' '));
-      showMessage(errors, '');
+    function renderState() {
+      if (!currentResult) return;
+      const design = currentResult.design || {};
+      if (design.sequence_label) {
+        setMetric('#metric-target', design.sequence_label);
+        setMetric('#metric-complement', design.complement_label);
+        setMetric('#metric-pairs', Array.isArray(design.recognition_pairs) ? design.recognition_pairs.join(' ') : '-');
+        setMetric('#metric-chain', design.chain_code || '-');
+      } else {
+        setMetricLoading('#metric-target');
+        setMetricLoading('#metric-complement');
+        setMetricLoading('#metric-pairs');
+        setMetricLoading('#metric-chain');
+      }
 
-      document.querySelector('#download-chemical').href = result.generated.chemical_svg_url;
-      document.querySelector('#download-schematic').href = result.generated.schematic_svg_url;
-      document.querySelector('#download-model').href = result.generated.complex_pdb_url;
-      document.querySelector('#download-chemical').download = result.generated.chemical_svg_name;
-      document.querySelector('#download-schematic').download = result.generated.schematic_svg_name;
-      document.querySelector('#download-model').download = result.generated.complex_pdb_name;
-      document.querySelector('#files').textContent =
-        'Generated with ' + design.chemical_renderer + '. SMILES: ' + design.chemical_smiles +
-        ' | Files: ' + design.files.chemical_svg + ' | ' + design.files.schematic_svg +
-        ' | ' + design.files.complex_pdb;
-
+      renderProductMetric('#metric-solubility', 'solubility', () => formatSolubility(design.solubility_predictions));
+      renderProductMetric('#metric-genome', 'genome', () => formatGenomeOccurrences(design.genome_occurrences));
+      renderProductMetric('#metric-model', 'model', () => formatModelStatus(design.model_3d));
+      renderGenomePanel(currentResult.productStatus.genome === 'done' ? design.genome_occurrences : null);
+      showMessage(warnings, Array.isArray(design.warnings) ? design.warnings.join(' ') : '');
+      renderFilesText(design);
       renderPreview();
+    }
+
+    function renderProductMetric(selector, product, formatter) {
+      const status = currentResult.productStatus[product];
+      if (status === 'done') {
+        setMetric(selector, formatter());
+      } else if (status === 'error') {
+        setMetric(selector, 'Error');
+      } else {
+        setMetricLoading(selector);
+      }
+    }
+
+    function renderFilesText(design) {
+      const files = design.files || {};
+      const pieces = [];
+      if (design.chemical_renderer) pieces.push('Generated with ' + design.chemical_renderer);
+      if (design.chemical_smiles) pieces.push('SMILES: ' + design.chemical_smiles);
+      ['chemical_svg', 'schematic_svg', 'complex_pdb'].forEach(key => {
+        if (files[key]) pieces.push(files[key]);
+      });
+      document.querySelector('#files').textContent = pieces.join(' | ');
     }
 
     function renderPreview() {
       if (!currentResult) return;
+      const download = renderPreviewDownload();
       if (currentView === 'chemical') {
-        preview.innerHTML = currentResult.chemical_svg;
+        preview.innerHTML = renderProductPreview('chemical', currentResult.chemical_svg, 'Chemical structure') + download;
       } else if (currentView === 'schematic') {
-        preview.innerHTML = currentResult.schematic_svg;
+        preview.innerHTML = renderProductPreview('schematic', currentResult.schematic_svg, 'Schematic') + download;
       } else {
-        preview.innerHTML = '<iframe class="model-frame" title="3D DNA polyamide model" src="' +
-          escapeHtml(currentResult.generated.model_html_url) + '"></iframe>';
+        if (currentResult.productStatus.model === 'done' && currentResult.generated.model_html_url) {
+          preview.innerHTML = '<iframe class="model-frame" title="3D DNA polyamide model" src="' +
+            escapeHtml(currentResult.generated.model_html_url) + '"></iframe>' + download;
+        } else if (currentResult.productStatus.model === 'error') {
+          preview.innerHTML = '<div class="empty">' + escapeHtml(currentResult.productErrors.model || 'The 3D model failed.') + '</div>';
+        } else {
+          preview.innerHTML = loadingMarkup('Building 3D model');
+        }
       }
       tabs.forEach(tab => {
         tab.setAttribute('aria-selected', String(tab.dataset.view === currentView));
       });
+    }
+
+    function renderPreviewDownload() {
+      const downloads = {
+        chemical: {
+          href: currentResult.generated.chemical_svg_url,
+          name: currentResult.generated.chemical_svg_name,
+          label: 'Download chemical SVG'
+        },
+        schematic: {
+          href: currentResult.generated.schematic_svg_url,
+          name: currentResult.generated.schematic_svg_name,
+          label: 'Download schematic SVG'
+        },
+        model: {
+          href: currentResult.generated.complex_pdb_url,
+          name: currentResult.generated.complex_pdb_name,
+          label: 'Download PDB'
+        }
+      };
+      const download = downloads[currentView];
+      if (!download || !download.href) return '';
+      return '<a class="preview-download" href="' + escapeHtml(download.href) + '" download="' +
+        escapeHtml(download.name || '') + '" aria-label="' + escapeHtml(download.label) +
+        '" title="' + escapeHtml(download.label) + '"><span aria-hidden="true">↓</span></a>';
+    }
+
+    function renderProductPreview(product, markup, label) {
+      const status = currentResult.productStatus[product];
+      if (status === 'done' && markup) return markup;
+      if (status === 'error') return '<div class="empty">' + escapeHtml(currentResult.productErrors[product] || label + ' failed.') + '</div>';
+      return loadingMarkup(label);
     }
 
     function scheduleDesign(delay = 250) {
@@ -583,29 +766,63 @@ HTML_PAGE = """<!doctype html>
       designTimer = window.setTimeout(() => design(null, requestId), delay);
     }
 
+    async function requestProduct(product, payload, runId) {
+      const response = await fetch('/api/design/product', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...payload, product, run_id: runId || '' })
+      });
+      const result = await response.json();
+      if (!response.ok) {
+        throw new Error(result.error || product + ' generation failed.');
+      }
+      return result;
+    }
+
+    async function runProduct(product, payload, runId, requestId) {
+      setProductLoading(product);
+      try {
+        const result = await requestProduct(product, payload, runId);
+        if (requestId !== activeDesignRequest) return null;
+        mergeProductResult(product, result);
+        return result;
+      } catch (error) {
+        if (requestId === activeDesignRequest) setProductError(product, error);
+        return null;
+      }
+    }
+
     async function design(event, queuedRequestId = null) {
       if (event) event.preventDefault();
       window.clearTimeout(designTimer);
       const requestId = queuedRequestId || activeDesignRequest + 1;
       activeDesignRequest = requestId;
+      const payload = payloadFromForm();
+      resetProductState();
       submit.disabled = true;
-      submit.textContent = 'Designing...';
+      submit.textContent = 'Updating...';
       showMessage(errors, '');
       try {
-        const response = await fetch('/api/design', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payloadFromForm())
-        });
-        const result = await response.json();
-        if (!response.ok) {
-          throw new Error(result.error || 'The CLI request failed.');
-        }
+        const schematic = await requestProduct('schematic', payload, null);
         if (requestId !== activeDesignRequest) return;
-        renderResult(result);
+        mergeProductResult('schematic', schematic);
+        const runId = schematic.run_id;
+
+        await runProduct('chemical', payload, runId, requestId);
+        if (requestId !== activeDesignRequest) return;
+
+        await Promise.all(productOrder
+          .filter(product => !['schematic', 'chemical'].includes(product))
+          .map(product => runProduct(product, payload, runId, requestId)));
       } catch (error) {
         if (requestId !== activeDesignRequest) return;
-        preview.innerHTML = '<div class="empty">The design could not be generated.</div>';
+        productOrder.forEach(product => {
+          if (currentResult.productStatus[product] !== 'done') {
+            currentResult.productStatus[product] = 'error';
+            currentResult.productErrors[product] = error.message;
+          }
+        });
+        renderState();
         showMessage(errors, error.message);
       } finally {
         if (requestId === activeDesignRequest) {
@@ -661,13 +878,13 @@ class PlannerRequestHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
-        if parsed.path != "/api/design":
+        if parsed.path not in {"/api/design", "/api/design/product"}:
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found."})
             return
 
         try:
             payload = self._read_json()
-            result = self._run_cli_design(payload)
+            result = self._run_cli_product(payload) if parsed.path == "/api/design/product" else self._run_cli_design(payload)
         except ValueError as exc:
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
             return
@@ -776,6 +993,90 @@ class PlannerRequestHandler(BaseHTTPRequestHandler):
             "invoked_command": command,
         }
 
+    def _run_cli_product(self, payload: dict) -> dict:
+        sequence = str(payload.get("sequence", "")).strip()
+        if not sequence:
+            raise ValueError("DNA sequence is required.")
+
+        product = _choice(
+            payload,
+            "product",
+            {"schematic", "chemical", "solubility", "genome", "model"},
+            "schematic",
+        )
+        architecture = _choice(payload, "architecture", {"hairpin", "linear"}, "hairpin")
+        at_mode = _choice(payload, "at_mode", {"distinguish", "py-py"}, "distinguish")
+        tail = _choice(payload, "tail", {"dp", "none"}, "dp")
+        turn = _choice(payload, "turn", {"gamma", "beta", "none"}, "gamma")
+        genome_ids = {GENOME_NONE_ID, *(str(genome["id"]) for genome in list_genomes())}
+        genome = _choice(payload, "genome", genome_ids, GENOME_NONE_ID)
+
+        safe_name = safe_design_name(sequence, architecture)
+        run_id = _run_id_from_payload(payload, safe_name)
+        run_dir = (self.output_root / run_id).resolve()
+        _assert_within(run_dir, self.output_root)
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        command = [
+            *_cli_command_prefix(),
+            "design",
+            sequence,
+            "--architecture",
+            architecture,
+            "--at-mode",
+            at_mode,
+            "--tail",
+            tail,
+            "--turn",
+            turn,
+            "--genome",
+            genome,
+            "--product",
+            product,
+            "--out",
+            str(run_dir),
+            "--name",
+            safe_name,
+            "--format",
+            "json",
+        ]
+
+        completed = subprocess.run(
+            command,
+            cwd=str(self.project_root),
+            text=True,
+            capture_output=True,
+            timeout=_product_timeout(product),
+        )
+        if completed.returncode != 0:
+            error = completed.stderr.strip() or completed.stdout.strip() or "CLI command failed."
+            raise RuntimeError(error)
+
+        try:
+            cli_payload = json.loads(completed.stdout)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"CLI returned invalid JSON: {exc.msg}.") from exc
+
+        result = {
+            "product": product,
+            "run_id": run_id,
+            "design": cli_payload,
+            "generated": {"run_id": run_id},
+            "invoked_command": command,
+        }
+
+        file_paths = _collect_generated_file_paths(cli_payload, self.output_root)
+        for key, path in file_paths.items():
+            result["generated"][f"{key}_url"] = f"/generated/{run_id}/{path.name}"
+            result["generated"][f"{key}_name"] = path.name
+
+        if "schematic_svg" in file_paths:
+            result["schematic_svg"] = file_paths["schematic_svg"].read_text(encoding="utf-8")
+        if "chemical_svg" in file_paths:
+            result["chemical_svg"] = file_paths["chemical_svg"].read_text(encoding="utf-8")
+
+        return result
+
     def _serve_generated(self, path: str) -> None:
         relative = unquote(path.removeprefix("/generated/"))
         if "/" not in relative:
@@ -859,6 +1160,41 @@ def _choice(payload: dict, key: str, allowed: set[str], default: str) -> str:
     if value not in allowed:
         raise ValueError(f"{key} must be one of: {', '.join(sorted(allowed))}.")
     return value
+
+
+def _run_id_from_payload(payload: dict, safe_name: str) -> str:
+    raw_run_id = str(payload.get("run_id") or "").strip()
+    if raw_run_id:
+        if any(not (char.isalnum() or char in "-_") for char in raw_run_id):
+            raise ValueError("run_id contains unsupported characters.")
+        return raw_run_id
+    return f"{int(time.time())}-{uuid.uuid4().hex[:8]}-{safe_name}"
+
+
+def _product_timeout(product: str) -> int:
+    return {
+        "schematic": 30,
+        "chemical": 120,
+        "solubility": 180,
+        "genome": 240,
+        "model": 180,
+    }.get(product, 120)
+
+
+def _collect_generated_file_paths(payload: dict, output_root: Path) -> dict[str, Path]:
+    files = payload.get("files", {})
+    if not isinstance(files, dict):
+        return {}
+
+    collected: dict[str, Path] = {}
+    for key, raw_path in files.items():
+        if not raw_path:
+            continue
+        path = Path(str(raw_path)).resolve()
+        _assert_within(path, output_root)
+        if path.exists():
+            collected[key] = path
+    return collected
 
 
 def _assert_within(path: Path, root: Path) -> None:

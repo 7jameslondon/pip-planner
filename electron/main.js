@@ -17,6 +17,7 @@ const startupTimingFile = process.env.PIP_PLANNER_STARTUP_TIMING_FILE || '';
 const startupTimingStdout = process.env.PIP_PLANNER_STARTUP_TIMING_STDOUT === '1';
 const splashMode = process.env.PIP_PLANNER_SPLASH_MODE || 'no-icon';
 const splashModeFlags = new Set(splashMode.split(/[,+]/).map(flag => flag.trim()).filter(Boolean));
+const devLogFile = process.env.PIP_PLANNER_DEV_LOG || '';
 
 const SPLASH_HTML = `<!doctype html>
 <html>
@@ -143,8 +144,19 @@ function serverApi() {
   return serverModule;
 }
 
+function writeDevLog(message) {
+  if (!devLogFile) return;
+  try {
+    fs.mkdirSync(path.dirname(devLogFile), { recursive: true });
+    fs.appendFileSync(devLogFile, `${new Date().toISOString()} ${message}\n`, 'utf-8');
+  } catch (_error) {
+    // Dev logging must never interfere with launching the app.
+  }
+}
+
 function recordStartupEvent(name) {
   const elapsedMs = performance.now() - startupStart;
+  writeDevLog(`startup:${name}:${elapsedMs.toFixed(1)}ms`);
   if (startupTimingStdout) {
     console.log(`electron-timing-${name}-ms=${elapsedMs.toFixed(1)}`);
   }
@@ -290,6 +302,7 @@ async function createWindowAfterSplash() {
 app.whenReady().then(() => {
   recordStartupEvent('app-ready');
   createWindow().catch(error => {
+    writeDevLog(`startup-error:${error.stack || error.message}`);
     dialog.showErrorBox('PIP Planner failed to start', error.stack || error.message);
     if (splashWindow && !splashWindow.isDestroyed()) {
       splashWindow.close();
@@ -303,10 +316,21 @@ app.on('activate', () => {
   if (BrowserWindow.getAllWindows().length === 0) {
     startupPromise = null;
     createWindow().catch(error => {
+      writeDevLog(`startup-error:${error.stack || error.message}`);
       dialog.showErrorBox('PIP Planner failed to start', error.stack || error.message);
       app.quit();
     });
   }
+});
+
+process.on('uncaughtException', error => {
+  writeDevLog(`uncaught-exception:${error.stack || error.message}`);
+  throw error;
+});
+
+process.on('unhandledRejection', reason => {
+  const message = reason && reason.stack ? reason.stack : String(reason);
+  writeDevLog(`unhandled-rejection:${message}`);
 });
 
 app.on('before-quit', () => {

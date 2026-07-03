@@ -79,7 +79,7 @@ Then open:
 http://127.0.0.1:8765/
 ```
 
-The UI updates automatically when the DNA sequence or design options change. The `Update now` button is only a manual refresh.
+The UI updates automatically when the DNA sequence or design options change. It requests generated products separately: the schematic starts first, then the chemical structure, then solubility, genome occurrence search, and the 3D model. Each panel shows a loading state until its own CLI-backed request finishes. The `Update now` button is only a manual refresh.
 
 Run the native Windows desktop UI:
 
@@ -212,6 +212,7 @@ Useful options:
 - `--turn gamma|beta|none`: label the hairpin turn.
 - `--genome none|human-grch38|hela`: scan a configured local reference genome for exact occurrences.
 - `--genome-location-threshold 100`: list locations only when the occurrence count is below this value.
+- `--product all|schematic|chemical|solubility|genome|model`: generate everything or one product for incremental UI updates.
 - `--format text|json`: choose human-readable output or JSON.
 
 Example:

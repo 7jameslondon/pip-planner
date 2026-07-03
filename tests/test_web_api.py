@@ -88,6 +88,57 @@ class WebApiTests(unittest.TestCase):
                     self.assertEqual(response.status, 200)
                     self.assertIn("chemical/x-pdb", response.headers["Content-Type"])
                     self.assertIn(b"PIP PLANNER DNA POLYAMIDE", response.read())
+
+                product_payload = json.dumps(
+                    {
+                        "sequence": "ATGC",
+                        "architecture": "linear",
+                        "at_mode": "py-py",
+                        "tail": "none",
+                        "turn": "gamma",
+                        "genome": "none",
+                        "product": "schematic",
+                    }
+                ).encode("utf-8")
+                product_request = request.Request(
+                    f"http://127.0.0.1:{port}/api/design/product",
+                    data=product_payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with request.urlopen(product_request, timeout=10) as response:
+                    schematic_result = json.loads(response.read().decode("utf-8"))
+
+                self.assertEqual(schematic_result["product"], "schematic")
+                self.assertIn("--product", schematic_result["invoked_command"])
+                self.assertIn("<svg", schematic_result["schematic_svg"])
+                self.assertIn("schematic_svg_url", schematic_result["generated"])
+
+                chemical_payload = json.dumps(
+                    {
+                        "sequence": "ATGC",
+                        "architecture": "linear",
+                        "at_mode": "py-py",
+                        "tail": "none",
+                        "turn": "gamma",
+                        "genome": "none",
+                        "product": "chemical",
+                        "run_id": schematic_result["run_id"],
+                    }
+                ).encode("utf-8")
+                chemical_request = request.Request(
+                    f"http://127.0.0.1:{port}/api/design/product",
+                    data=chemical_payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with request.urlopen(chemical_request, timeout=10) as response:
+                    chemical_result = json.loads(response.read().decode("utf-8"))
+
+                self.assertEqual(chemical_result["product"], "chemical")
+                self.assertEqual(chemical_result["run_id"], schematic_result["run_id"])
+                self.assertIn("<svg", chemical_result["chemical_svg"])
+                self.assertIn("chemical_svg_url", chemical_result["generated"])
             finally:
                 server.terminate()
                 try:

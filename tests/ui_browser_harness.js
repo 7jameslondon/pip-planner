@@ -30,6 +30,15 @@ async function main() {
   try {
     await page.goto(baseUrl, { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('#preview svg', { timeout: 10000 });
+    const toolbarDownloads = await page.locator('.toolbar .download').count();
+    if (toolbarDownloads !== 0) {
+      throw new Error(`Expected no toolbar download links, saw ${toolbarDownloads}.`);
+    }
+    await page.waitForFunction(() => {
+      const title = document.querySelector('#preview svg title');
+      return title && title.textContent.includes('schematic');
+    }, null, { timeout: 10000 });
+    await page.waitForSelector('#preview .preview-download[aria-label="Download schematic SVG"]', { timeout: 10000 });
 
     await page.fill('#sequence', 'axt gc123');
     const sanitizedSequence = await page.locator('#sequence').inputValue();
@@ -50,6 +59,8 @@ async function main() {
         solubility.textContent.includes('SolTranNet');
     }, null, { timeout: 10000 });
 
+    await page.click('[data-view="chemical"]');
+    await page.waitForSelector('#preview .preview-download[aria-label="Download chemical SVG"]', { timeout: 10000 });
     const chemicalRenderer = await page.locator('#preview svg').getAttribute('data-renderer');
     if (chemicalRenderer !== 'RDKit') {
       throw new Error(`Expected RDKit chemical SVG, saw renderer: ${chemicalRenderer}`);
@@ -60,9 +71,11 @@ async function main() {
       const title = document.querySelector('#preview svg title');
       return title && title.textContent.includes('schematic');
     }, null, { timeout: 10000 });
+    await page.waitForSelector('#preview .preview-download[aria-label="Download schematic SVG"]', { timeout: 10000 });
 
     await page.click('[data-view="model"]');
     await page.waitForSelector('#preview iframe.model-frame', { timeout: 10000 });
+    await page.waitForSelector('#preview .preview-download[aria-label="Download PDB"]', { timeout: 10000 });
     const modelFrame = page.frameLocator('#preview iframe.model-frame');
     await modelFrame.locator('canvas#scene').waitFor({ timeout: 10000 });
 

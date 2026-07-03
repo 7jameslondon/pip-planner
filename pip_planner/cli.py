@@ -7,7 +7,14 @@ import sys
 
 from .genome import GENOME_NONE_ID, analyze_genome_occurrences
 from .model import DesignOptions, SequenceValidationError, design_polyamide, safe_design_name
-from .svg import write_design_files
+from .solubility import predict_solubility
+from .svg import (
+    chemical_rendering_for_design,
+    write_chemical_file,
+    write_design_files,
+    write_model_files,
+    write_schematic_file,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -73,6 +80,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=100,
         help="List occurrence locations only when the total count is below this value. Default: 100.",
     )
+    design_parser.add_argument(
+        "--product",
+        choices=["all", "schematic", "chemical", "solubility", "genome", "model"],
+        default="all",
+        help="Generate one product for incremental UI updates, or all products. Default: all.",
+    )
 
     return parser
 
@@ -104,20 +117,23 @@ def main(argv: list[str] | None = None) -> int:
         )
         design = design_polyamide(args.sequence, options)
         name = args.name or safe_design_name(design.sequence, design.options.architecture)
-        genome_occurrences = analyze_genome_occurrences(
-            design.sequence,
-            args.genome,
-            location_threshold=args.genome_location_threshold,
-        )
-        if genome_occurrences["status"] == "unknown_genome":
-            parser.error(str(genome_occurrences["message"]))
-        files = write_design_files(
-            design,
-            Path(args.out),
-            name,
-            extra_payload={"genome_occurrences": genome_occurrences},
-        )
-        persisted_payload = json.loads(files["json"].read_text(encoding="utf-8"))
+        if args.product == "all":
+            genome_occurrences = analyze_genome_occurrences(
+                design.sequence,
+                args.genome,
+                location_threshold=args.genome_location_threshold,
+            )
+            if genome_occurrences["status"] == "unknown_genome":
+                parser.error(str(genome_occurrences["message"]))
+            files = write_design_files(
+                design,
+                Path(args.out),
+                name,
+                extra_payload={"genome_occurrences": genome_occurrences},
+            )
+            persisted_payload = json.loads(files["json"].read_text(encoding="utf-8"))
+        else:
+            persisted_payload = _generate_product_payload(design, args, Path(args.out), name)
     except SequenceValidationError as exc:
         parser.error(str(exc))
     except RuntimeError as exc:
@@ -129,12 +145,63 @@ def main(argv: list[str] | None = None) -> int:
 
     payload = persisted_payload
 
-    if args.format == "json":
+    if args.format == "json" or args.product != "all":
         print(json.dumps(payload, indent=2))
     else:
         print(_format_text_summary(payload))
 
     return 0
+
+
+def _generate_product_payload(design, args: argparse.Namespace, out_dir: Path, name: str) -> dict:
+    payload = design.to_dict() | {"product": args.product, "files": {}}
+
+    if args.product == "schematic":
+        files = write_schematic_file(design, out_dir, name)
+        return payload | {"files": _string_paths(files)}
+
+    if args.product == "chemical":
+        files, rendering = write_chemical_file(design, out_dir, name)
+        return payload | {
+            "files": _string_paths(files),
+            "chemical_renderer": rendering.renderer,
+            "chemical_smiles": rendering.canonical_smiles,
+            "chemical_svg_note": rendering.note,
+        }
+
+    if args.product == "solubility":
+        rendering = chemical_rendering_for_design(design)
+        return payload | {
+            "chemical_renderer": rendering.renderer,
+            "chemical_smiles": rendering.canonical_smiles,
+            "solubility_predictions": list(predict_solubility(rendering.canonical_smiles)),
+        }
+
+    if args.product == "genome":
+        genome_occurrences = analyze_genome_occurrences(
+            design.sequence,
+            args.genome,
+            location_threshold=args.genome_location_threshold,
+        )
+        if genome_occurrences["status"] == "unknown_genome":
+            raise SequenceValidationError(str(genome_occurrences["message"]))
+        return payload | {"genome_occurrences": genome_occurrences}
+
+    if args.product == "model":
+        rendering = chemical_rendering_for_design(design)
+        model_payload = write_model_files(design, out_dir, name, rendering.canonical_smiles)
+        return payload | {
+            "files": _string_paths(model_payload["model_3d"]["files"]),
+            "chemical_renderer": rendering.renderer,
+            "chemical_smiles": rendering.canonical_smiles,
+            **model_payload,
+        }
+
+    raise RuntimeError(f"Unsupported product: {args.product}")
+
+
+def _string_paths(paths: dict[str, Path | str]) -> dict[str, str]:
+    return {key: str(value) for key, value in paths.items()}
 
 
 def _format_text_summary(payload: dict) -> str:

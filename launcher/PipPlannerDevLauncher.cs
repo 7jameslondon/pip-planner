@@ -28,6 +28,17 @@ namespace PipPlannerDevLauncher
 
             try
             {
+                string outputDir = Path.Combine(projectRoot, "output");
+                Directory.CreateDirectory(outputDir);
+                string logPath = Path.Combine(outputDir, "dev-launcher.log");
+                string timingPath = Path.Combine(outputDir, "dev-launcher-startup.jsonl");
+                string pythonExe = FindPython(projectRoot);
+
+                File.AppendAllText(
+                    logPath,
+                    DateTime.Now.ToString("s") + " Starting PIP Planner Dev from " + projectRoot + Environment.NewLine
+                );
+
                 ProcessStartInfo startInfo = new ProcessStartInfo();
                 startInfo.FileName = electronExe;
                 startInfo.Arguments = ".";
@@ -35,6 +46,17 @@ namespace PipPlannerDevLauncher
                 startInfo.UseShellExecute = false;
                 startInfo.CreateNoWindow = true;
                 startInfo.EnvironmentVariables["PIP_PLANNER_DEV_LAUNCHER"] = "1";
+                startInfo.EnvironmentVariables["PIP_PLANNER_DEV_LOG"] = logPath;
+                startInfo.EnvironmentVariables["PIP_PLANNER_STARTUP_TIMING_FILE"] = timingPath;
+                if (!String.IsNullOrEmpty(pythonExe))
+                {
+                    startInfo.EnvironmentVariables["PIP_PLANNER_PYTHON"] = pythonExe;
+                    File.AppendAllText(logPath, "Using Python: " + pythonExe + Environment.NewLine);
+                }
+                else
+                {
+                    File.AppendAllText(logPath, "No Python executable was found by the launcher." + Environment.NewLine);
+                }
                 Process.Start(startInfo);
             }
             catch (Exception ex)
@@ -46,6 +68,30 @@ namespace PipPlannerDevLauncher
                     MessageBoxIcon.Error
                 );
             }
+        }
+
+        private static string FindPython(string projectRoot)
+        {
+            string[] candidates = new string[]
+            {
+                Path.Combine(projectRoot, ".venv", "Scripts", "python.exe"),
+                Path.Combine(projectRoot, "venv", "Scripts", "python.exe"),
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "miniconda3", "python.exe"),
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "anaconda3", "python.exe"),
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "Python", "Python312", "python.exe"),
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "Python", "Python311", "python.exe"),
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "Python", "Python310", "python.exe")
+            };
+
+            foreach (string candidate in candidates)
+            {
+                if (File.Exists(candidate))
+                {
+                    return candidate;
+                }
+            }
+
+            return "";
         }
     }
 }
