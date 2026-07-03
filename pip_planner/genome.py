@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from bisect import bisect_right
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from functools import lru_cache
 import gzip
@@ -43,7 +44,7 @@ CATALOG_REFERENCES: tuple[GenomeCatalogEntry, ...] = (
     GenomeCatalogEntry(
         id="sacCer3",
         label="Saccharomyces cerevisiae sacCer3",
-        fasta="sacCer3/genome.fa.gz",
+        fasta="sacCer3/genome.fa",
         download_url="https://hgdownload.soe.ucsc.edu/goldenPath/sacCer3/bigZips/sacCer3.fa.gz",
         size_label="3.6 MB",
         size_bytes=3820548,
@@ -55,7 +56,7 @@ CATALOG_REFERENCES: tuple[GenomeCatalogEntry, ...] = (
     GenomeCatalogEntry(
         id="ce11",
         label="Caenorhabditis elegans ce11",
-        fasta="ce11/genome.fa.gz",
+        fasta="ce11/genome.fa",
         download_url="https://hgdownload.soe.ucsc.edu/goldenPath/ce11/bigZips/ce11.fa.gz",
         size_label="30 MB",
         size_bytes=31816111,
@@ -65,7 +66,7 @@ CATALOG_REFERENCES: tuple[GenomeCatalogEntry, ...] = (
     GenomeCatalogEntry(
         id="dm6",
         label="Drosophila melanogaster dm6",
-        fasta="dm6/genome.fa.gz",
+        fasta="dm6/genome.fa",
         download_url="https://hgdownload.soe.ucsc.edu/goldenPath/dm6/bigZips/dm6.fa.gz",
         size_label="43 MB",
         size_bytes=45153922,
@@ -75,7 +76,7 @@ CATALOG_REFERENCES: tuple[GenomeCatalogEntry, ...] = (
     GenomeCatalogEntry(
         id="human-grch38",
         label="Human GRCh38/hg38",
-        fasta="human-grch38/genome.fa.gz",
+        fasta="human-grch38/genome.fa",
         download_url="https://hgdownload.soe.ucsc.edu/goldenPath/hg38/bigZips/hg38.fa.gz",
         size_label="938 MB",
         size_bytes=983659424,
@@ -85,7 +86,7 @@ CATALOG_REFERENCES: tuple[GenomeCatalogEntry, ...] = (
     GenomeCatalogEntry(
         id="mouse-mm39",
         label="Mouse GRCm39/mm39",
-        fasta="mouse-mm39/genome.fa.gz",
+        fasta="mouse-mm39/genome.fa",
         download_url="https://hgdownload.soe.ucsc.edu/goldenPath/mm39/bigZips/mm39.fa.gz",
         size_label="830 MB",
         size_bytes=870543764,
@@ -219,6 +220,15 @@ def download_genome_reference(
     if reference is None:
         raise ValueError(f"Unknown genome '{genome_id}'.")
     if reference.available and not force:
+        if reference.fasta is not None and reference.fasta.suffix.lower() == ".gz":
+            decompressed = _ensure_decompressed_fasta(reference.fasta, remove_source=True)
+            if decompressed.suffix.lower() != ".gz":
+                refreshed = {reference.id: reference for reference in list_genome_references(genome_root)}[genome_id]
+                return {
+                    "status": "downloaded",
+                    "genome": refreshed.to_dict(),
+                    "message": f"Converted {refreshed.label} to decompressed FASTA storage.",
+                }
         return {
             "status": "already_available",
             "genome": reference.to_dict(),
@@ -231,10 +241,19 @@ def download_genome_reference(
     relative_fasta = entry.fasta if entry is not None else f"{genome_id}/genome.fa.gz"
     destination = (root / relative_fasta).resolve()
     destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_name(destination.name + ".download")
+    temporary = _download_temporary_path(destination)
+    legacy_temporary = _legacy_download_temporary_path(destination)
 
     if not force and _complete_temporary_download(temporary, reference):
-        _promote_download(temporary, destination)
+        _install_downloaded_fasta(temporary, destination, compressed=_download_is_compressed(reference.download_url))
+        refreshed = {reference.id: reference for reference in list_genome_references(genome_root)}[genome_id]
+        return {
+            "status": "downloaded",
+            "genome": refreshed.to_dict(),
+            "message": f"Finished installing {refreshed.label} from a completed download.",
+        }
+    if legacy_temporary is not None and not force and _complete_temporary_download(legacy_temporary, reference):
+        _install_downloaded_fasta(legacy_temporary, destination, compressed=_download_is_compressed(reference.download_url))
         refreshed = {reference.id: reference for reference in list_genome_references(genome_root)}[genome_id]
         return {
             "status": "downloaded",
@@ -273,7 +292,7 @@ def download_genome_reference(
                 f"Downloaded {reference.label} but checksum did not match. "
                 f"Expected {reference.sha256}, got {actual_sha256}."
             )
-        _promote_download(temporary, destination)
+        _install_downloaded_fasta(temporary, destination, compressed=_download_is_compressed(reference.download_url))
     finally:
         if remove_temporary and temporary.exists():
             temporary.unlink()
@@ -314,7 +333,7 @@ def import_genome_reference(
         raise ValueError(f"Genome '{genome_id}' already has a FASTA at {destination}.")
 
     if source != destination:
-        shutil.copy2(source, destination)
+        _copy_fasta(source, destination)
 
     manifest_entry = {
         "id": genome_id,
@@ -430,26 +449,13 @@ def analyze_genome_occurrences(
         }
 
     assert reference.fasta is not None
+    fasta_path = _ensure_decompressed_fasta(reference.fasta)
     reverse_sequence = _reverse_complement(sequence)
     needles = (("+", sequence),) if reverse_sequence == sequence else (("+", sequence), ("-", reverse_sequence))
-    stored_hits: list[dict] = []
-    total = 0
-    total_possibilities = 0
-
-    for contig, bases in _iter_fasta_records(reference.fasta):
-        total_possibilities += max(0, len(bases) - len(sequence) + 1) * len(needles)
-        for strand, needle in needles:
-            for offset in _find_all(bases, needle):
-                total += 1
-                if total <= location_threshold:
-                    stored_hits.append(
-                        {
-                            "contig": contig,
-                            "start": offset + 1,
-                            "end": offset + len(sequence),
-                            "strand": strand,
-                        }
-                    )
+    search_result = _search_fasta_records(fasta_path, needles, len(sequence), location_threshold)
+    total = search_result["total_occurrences"]
+    total_possibilities = search_result["total_possibilities"]
+    stored_hits = search_result["locations"]
 
     locations_listed = total < location_threshold
     locations = stored_hits if locations_listed else []
@@ -577,6 +583,20 @@ def _download_size(path: Path) -> int:
         return 0
 
 
+def _download_temporary_path(destination: Path) -> Path:
+    return destination.with_name(destination.name + ".download")
+
+
+def _legacy_download_temporary_path(destination: Path) -> Path | None:
+    if destination.suffix.lower() not in {".fa", ".fasta", ".fna"}:
+        return None
+    return destination.with_name(destination.name + ".gz.download")
+
+
+def _download_is_compressed(url: str) -> bool:
+    return url.lower().split("?", 1)[0].endswith(".gz")
+
+
 def _complete_temporary_download(path: Path, reference: GenomeReference) -> bool:
     if not path.exists():
         return False
@@ -635,6 +655,44 @@ def _unlink_with_retries(path: Path) -> None:
             return
         except OSError:
             time.sleep(min(0.25 * (attempt + 1), 1.0))
+
+
+def _install_downloaded_fasta(temporary: Path, destination: Path, *, compressed: bool) -> None:
+    if not compressed:
+        _promote_download(temporary, destination)
+        return
+
+    decompressed = destination.with_name(destination.name + ".decompress")
+    with gzip.open(temporary, "rb") as source, decompressed.open("wb") as target:
+        shutil.copyfileobj(source, target, length=1024 * 1024)
+    _promote_download(decompressed, destination)
+    _unlink_with_retries(temporary)
+
+
+def _copy_fasta(source: Path, destination: Path) -> None:
+    if _is_gzipped_fasta(source):
+        with gzip.open(source, "rb") as source_handle, destination.open("wb") as target_handle:
+            shutil.copyfileobj(source_handle, target_handle, length=1024 * 1024)
+    else:
+        shutil.copy2(source, destination)
+
+
+def _ensure_decompressed_fasta(path: Path, *, remove_source: bool = False) -> Path:
+    if path.suffix.lower() != ".gz":
+        return path
+    destination = path.with_suffix("")
+    if destination.exists():
+        if remove_source:
+            _unlink_with_retries(path)
+        return destination
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        _copy_fasta(path, destination)
+        if remove_source:
+            _unlink_with_retries(path)
+        return destination
+    except OSError:
+        return path
 
 
 def _references_from_manifest(root: Path, manifest: Path) -> Iterable[GenomeReference]:
@@ -718,8 +776,13 @@ def _looks_like_fasta(path: Path) -> bool:
     return suffixes[-1] in {".fa", ".fasta", ".fna"}
 
 
+def _is_gzipped_fasta(path: Path) -> bool:
+    suffixes = [suffix.lower() for suffix in path.suffixes]
+    return len(suffixes) >= 2 and suffixes[-1] == ".gz" and suffixes[-2] in {".fa", ".fasta", ".fna"}
+
+
 def _imported_fasta_name(path: Path) -> str:
-    return "genome.fa.gz" if path.suffix.lower() == ".gz" else "genome.fa"
+    return "genome.fa"
 
 
 def _label_from_fasta(path: Path) -> str:
@@ -809,6 +872,99 @@ def _iter_fasta_records(path: Path) -> Iterator[tuple[str, str]]:
                 chunks.append(line)
     if name is not None:
         yield name, "".join(chunks).upper()
+
+
+def _search_fasta_records(
+    path: Path,
+    needles: tuple[tuple[str, str], ...],
+    query_length: int,
+    location_threshold: int,
+) -> dict:
+    workers = _genome_search_workers()
+    if workers <= 1:
+        results = [
+            (index, _search_contig(contig, bases, needles, query_length, location_threshold))
+            for index, (contig, bases) in enumerate(_iter_fasta_records(path))
+        ]
+    else:
+        results = _parallel_search_fasta_records(path, needles, query_length, location_threshold, workers)
+
+    total_occurrences = 0
+    total_possibilities = 0
+    locations: list[dict] = []
+    for _index, result in sorted(results, key=lambda item: item[0]):
+        total_occurrences += int(result["total_occurrences"])
+        total_possibilities += int(result["total_possibilities"])
+        if len(locations) < location_threshold:
+            remaining = location_threshold - len(locations)
+            locations.extend(result["locations"][:remaining])
+    return {
+        "total_occurrences": total_occurrences,
+        "total_possibilities": total_possibilities,
+        "locations": locations,
+    }
+
+
+def _parallel_search_fasta_records(
+    path: Path,
+    needles: tuple[tuple[str, str], ...],
+    query_length: int,
+    location_threshold: int,
+    workers: int,
+) -> list[tuple[int, dict]]:
+    results: list[tuple[int, dict]] = []
+    pending = {}
+    max_pending = max(1, workers * 2)
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        for index, (contig, bases) in enumerate(_iter_fasta_records(path)):
+            future = executor.submit(_search_contig, contig, bases, needles, query_length, location_threshold)
+            pending[future] = index
+            if len(pending) >= max_pending:
+                completed, _remaining = wait(pending, return_when=FIRST_COMPLETED)
+                for completed_future in completed:
+                    results.append((pending.pop(completed_future), completed_future.result()))
+        for future in list(pending):
+            results.append((pending[future], future.result()))
+    return results
+
+
+def _search_contig(
+    contig: str,
+    bases: str,
+    needles: tuple[tuple[str, str], ...],
+    query_length: int,
+    location_threshold: int,
+) -> dict:
+    total = 0
+    locations: list[dict] = []
+    total_possibilities = max(0, len(bases) - query_length + 1) * len(needles)
+    for strand, needle in needles:
+        for offset in _find_all(bases, needle):
+            total += 1
+            if len(locations) < location_threshold:
+                locations.append(
+                    {
+                        "contig": contig,
+                        "start": offset + 1,
+                        "end": offset + query_length,
+                        "strand": strand,
+                    }
+                )
+    return {
+        "total_occurrences": total,
+        "total_possibilities": total_possibilities,
+        "locations": locations,
+    }
+
+
+def _genome_search_workers() -> int:
+    configured = os.environ.get("PIP_PLANNER_GENOME_SEARCH_WORKERS")
+    if configured:
+        try:
+            return max(1, int(configured))
+        except ValueError:
+            return 1
+    return max(1, min(4, os.cpu_count() or 1))
 
 
 def _find_all(haystack: str, needle: str) -> Iterator[int]:

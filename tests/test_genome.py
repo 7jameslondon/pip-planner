@@ -51,6 +51,15 @@ class GenomeOccurrenceTests(unittest.TestCase):
         self.assertFalse(result["locations_listed"])
         self.assertEqual(result["locations"], [])
 
+    def test_parallel_search_matches_sequential_search(self) -> None:
+        with mock.patch.dict("os.environ", {"PIP_PLANNER_GENOME_SEARCH_WORKERS": "1"}):
+            sequential = analyze_genome_occurrences("ATGC", "human-grch38", genome_root=FIXTURE_GENOMES)
+        with mock.patch.dict("os.environ", {"PIP_PLANNER_GENOME_SEARCH_WORKERS": "2"}):
+            parallel = analyze_genome_occurrences("ATGC", "human-grch38", genome_root=FIXTURE_GENOMES)
+
+        for key in ("total_occurrences", "total_possibilities", "locations"):
+            self.assertEqual(parallel[key], sequential[key])
+
     def test_reports_missing_reference_without_guessing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             result = analyze_genome_occurrences("ATGC", "human-grch38", genome_root=tmp)
@@ -88,6 +97,19 @@ class GenomeOccurrenceTests(unittest.TestCase):
             self.assertIn("my-reference", references)
             self.assertTrue(references["my-reference"].available)
 
+    def test_import_decompresses_gzipped_fasta(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "my-reference.fa.gz"
+            with gzip.open(source, "wt", encoding="utf-8") as handle:
+                handle.write(">chrCustom\nATGCATGC\n")
+
+            result = import_genome_reference(source, label="My Reference", genome_root=tmp)
+
+            self.assertEqual(result["status"], "imported")
+            fasta = Path(result["genome"]["fasta"])
+            self.assertEqual(fasta.name, "genome.fa")
+            self.assertEqual(fasta.read_text(encoding="utf-8"), ">chrCustom\nATGCATGC\n")
+
     def test_delete_removes_imported_reference_from_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp) / "my-reference.fa"
@@ -117,7 +139,7 @@ class GenomeOccurrenceTests(unittest.TestCase):
                 GenomeCatalogEntry(
                     id="tiny",
                     label="Tiny test genome",
-                    fasta="tiny/genome.fa.gz",
+                    fasta="tiny/genome.fa",
                     download_url=source.as_uri(),
                     size_label="small",
                     source_url=source.as_uri(),
@@ -129,12 +151,40 @@ class GenomeOccurrenceTests(unittest.TestCase):
                 result = download_genome_reference("tiny", genome_root=Path(tmp) / "dest")
 
             self.assertEqual(result["status"], "downloaded")
-            self.assertTrue((Path(tmp) / "dest" / "tiny" / "genome.fa.gz").exists())
+            destination = Path(tmp) / "dest" / "tiny" / "genome.fa"
+            self.assertTrue(destination.exists())
+            self.assertEqual(destination.read_text(encoding="utf-8"), ">chrTiny\nATGCATGC\n")
+
+    def test_download_converts_existing_compressed_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "dest"
+            compressed = root / "tiny" / "genome.fa.gz"
+            compressed.parent.mkdir(parents=True)
+            with gzip.open(compressed, "wt", encoding="utf-8") as handle:
+                handle.write(">chrTiny\nATGCATGC\n")
+            catalog = (
+                GenomeCatalogEntry(
+                    id="tiny",
+                    label="Tiny test genome",
+                    fasta="tiny/genome.fa",
+                    download_url="https://example.invalid/tiny.fa.gz",
+                    size_label="small",
+                    source_url="https://example.invalid/",
+                ),
+            )
+
+            with mock.patch("pip_planner.genome.CATALOG_REFERENCES", catalog):
+                with mock.patch("pip_planner.genome.urlopen", side_effect=AssertionError("network should not be used")):
+                    result = download_genome_reference("tiny", genome_root=root)
+
+            self.assertEqual(result["status"], "downloaded")
+            self.assertEqual((root / "tiny" / "genome.fa").read_text(encoding="utf-8"), ">chrTiny\nATGCATGC\n")
+            self.assertFalse(compressed.exists())
 
     def test_download_promotes_completed_temporary_file_without_network(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "dest"
-            destination = root / "tiny" / "genome.fa.gz"
+            destination = root / "tiny" / "genome.fa"
             temporary = destination.with_name(destination.name + ".download")
             temporary.parent.mkdir(parents=True)
             with gzip.open(temporary, "wt", encoding="utf-8") as handle:
@@ -145,7 +195,7 @@ class GenomeOccurrenceTests(unittest.TestCase):
                 GenomeCatalogEntry(
                     id="tiny",
                     label="Tiny test genome",
-                    fasta="tiny/genome.fa.gz",
+                    fasta="tiny/genome.fa",
                     download_url="https://example.invalid/tiny.fa.gz",
                     size_label="small",
                     size_bytes=len(payload),
@@ -160,6 +210,7 @@ class GenomeOccurrenceTests(unittest.TestCase):
 
             self.assertEqual(result["status"], "downloaded")
             self.assertTrue(destination.exists())
+            self.assertEqual(destination.read_text(encoding="utf-8"), ">chrTiny\nATGCATGC\n")
             self.assertFalse(temporary.exists())
 
     def test_download_resumes_partial_temporary_file(self) -> None:
@@ -192,7 +243,7 @@ class GenomeOccurrenceTests(unittest.TestCase):
             full_payload = gzip.compress(b">chrTiny\nATGCATGC\n")
             split_at = 10
             root = Path(tmp) / "dest"
-            destination = root / "tiny" / "genome.fa.gz"
+            destination = root / "tiny" / "genome.fa"
             temporary = destination.with_name(destination.name + ".download")
             temporary.parent.mkdir(parents=True)
             temporary.write_bytes(full_payload[:split_at])
@@ -200,7 +251,7 @@ class GenomeOccurrenceTests(unittest.TestCase):
                 GenomeCatalogEntry(
                     id="tiny",
                     label="Tiny test genome",
-                    fasta="tiny/genome.fa.gz",
+                    fasta="tiny/genome.fa",
                     download_url="https://example.invalid/tiny.fa.gz",
                     size_label="small",
                     size_bytes=len(full_payload),
@@ -221,7 +272,7 @@ class GenomeOccurrenceTests(unittest.TestCase):
 
             self.assertEqual(result["status"], "downloaded")
             self.assertEqual(seen_ranges, [f"bytes={split_at}-"])
-            self.assertEqual(destination.read_bytes(), full_payload)
+            self.assertEqual(destination.read_text(encoding="utf-8"), ">chrTiny\nATGCATGC\n")
             self.assertFalse(temporary.exists())
 
 

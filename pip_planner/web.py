@@ -1917,8 +1917,12 @@ def _downloaded_bytes(expected_fasta: str) -> int:
     if not expected_fasta:
         return 0
     final_path = Path(expected_fasta)
-    download_path = final_path.with_name(final_path.name + ".download")
-    for path in (download_path, final_path):
+    candidates = [
+        final_path.with_name(final_path.name + ".download"),
+        final_path.with_name(final_path.name + ".gz.download"),
+        final_path,
+    ]
+    for path in candidates:
         try:
             if path.exists():
                 return path.stat().st_size
