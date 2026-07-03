@@ -32,6 +32,6 @@ This project is a small, dependency-light Python application. Keep the CLI as th
 - Run `python scripts/run_ui_browser_harness.py` after UI or SVG layout changes.
 - Run `pnpm test:electron-server` after changing `electron/` process startup code.
 - Run `pnpm test:electron-smoke` after changing Electron window startup behavior.
-- Run `pnpm build` and `pnpm test:packaged` after changing packaging, backend startup, or Electron build config.
+- `pnpm build` can take more than 10 minutes; only run it when explicitly requested. Run `pnpm test:packaged` after changing packaging, backend startup, or Electron build config.
 - RDKit is the required chemistry backend for chemical SVG output. Do not reintroduce hand-drawn chemical structures as the primary renderer.
 - Treat the chemical SVG as a planning visualization until terminal caps/linkers are confirmed for synthesis.
