@@ -378,7 +378,11 @@ def _format_genome_rows(genome_result: dict) -> list[str]:
 
     genome_label = genome_result.get("genome_label") or genome_result.get("genome_id") or "Genome"
     total = genome_result.get("total_occurrences")
-    rows = [f"  - {genome_label}: {total} exact occurrence(s)."]
+    possibilities = genome_result.get("total_possibilities")
+    if isinstance(possibilities, int):
+        rows = [f"  - {genome_label}: {total} exact occurrence(s) out of {possibilities} possible position(s)."]
+    else:
+        rows = [f"  - {genome_label}: {total} exact occurrence(s)."]
     if genome_result.get("locations_listed"):
         for location in genome_result.get("locations", []):
             rows.append(

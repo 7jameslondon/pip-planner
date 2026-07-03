@@ -626,8 +626,15 @@ HTML_PAGE = """<!doctype html>
       if (genomeResult.status === 'missing_reference') return 'Reference missing';
       if (genomeResult.status !== 'ok') return genomeResult.status || 'Unavailable';
       const count = Number(genomeResult.total_occurrences);
+      const possibilities = Number(genomeResult.total_possibilities);
       const label = genomeResult.genome_label || genomeResult.genome_id || 'Genome';
-      return Number.isFinite(count) ? count.toLocaleString() + ' in ' + label : label;
+      if (!Number.isFinite(count)) return label;
+      const matchLabel = count === 1 ? 'match' : 'matches';
+      if (Number.isFinite(possibilities)) {
+        return count.toLocaleString() + ' ' + matchLabel + ' out of ' +
+          possibilities.toLocaleString() + ' possibilities in ' + label;
+      }
+      return count.toLocaleString() + ' ' + matchLabel + ' in ' + label;
     }
 
     function productForView(view = currentView) {
@@ -872,7 +879,7 @@ HTML_PAGE = """<!doctype html>
 
     async function downloadGenome(genomeId) {
       if (!genomeId || (genomeDownloads[genomeId] && genomeDownloads[genomeId].status === 'running')) return;
-      setGenomeStatus('Downloading ' + genomeId + '...');
+      setGenomeStatus('');
       try {
         const response = await fetch('/api/genomes/download', {
           method: 'POST',
@@ -907,7 +914,7 @@ HTML_PAGE = """<!doctype html>
         if (result.status === 'complete' || result.status === 'already_available') {
           delete genomeDownloads[genomeId];
           await loadGenomes();
-          setGenomeStatus(result.message || 'Genome downloaded.');
+          setGenomeStatus('');
           renderPreview();
           return;
         }

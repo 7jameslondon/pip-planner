@@ -83,6 +83,7 @@ class WebApiTests(unittest.TestCase):
                 solubility_methods = {prediction["method"] for prediction in result["design"]["solubility_predictions"]}
                 self.assertEqual(solubility_methods, {"ADMET-AI v2", "SolTranNet"})
                 self.assertEqual(result["design"]["genome_occurrences"]["total_occurrences"], 2)
+                self.assertEqual(result["design"]["genome_occurrences"]["total_possibilities"], 34)
                 self.assertEqual(result["design"]["model_3d"]["dna_force_field"], "AMBER DNA.OL24")
                 self.assertIn("model_html_url", result["generated"])
                 self.assertIn("complex_pdb_url", result["generated"])

@@ -29,6 +29,7 @@ class GenomeOccurrenceTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["total_occurrences"], 2)
+        self.assertEqual(result["total_possibilities"], 34)
         self.assertTrue(result["locations_listed"])
         self.assertEqual(
             [(hit["contig"], hit["start"], hit["end"], hit["strand"]) for hit in result["locations"]],
@@ -56,6 +57,7 @@ class GenomeOccurrenceTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "missing_reference")
         self.assertIsNone(result["total_occurrences"])
+        self.assertIsNone(result["total_possibilities"])
 
     def test_catalog_lists_public_references_without_hela(self) -> None:
         references = {reference.id: reference for reference in list_genome_references(ROOT / "data" / "genomes")}

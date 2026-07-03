@@ -151,6 +151,7 @@ class CliTests(unittest.TestCase):
             genome = payload["genome_occurrences"]
             self.assertEqual(genome["status"], "ok")
             self.assertEqual(genome["total_occurrences"], 2)
+            self.assertEqual(genome["total_possibilities"], 34)
             self.assertTrue(genome["locations_listed"])
             self.assertIn("GENE1", genome["locations"][0]["feature_summary"])
 

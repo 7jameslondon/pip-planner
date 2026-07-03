@@ -384,6 +384,7 @@ def analyze_genome_occurrences(
             "query": sequence,
             "query_length": len(sequence),
             "total_occurrences": None,
+            "total_possibilities": None,
             "searched_strands": [],
             "locations_listed": False,
             "location_threshold": location_threshold,
@@ -400,6 +401,7 @@ def analyze_genome_occurrences(
             "query": sequence,
             "query_length": len(sequence),
             "total_occurrences": None,
+            "total_possibilities": None,
             "searched_strands": [],
             "locations_listed": False,
             "location_threshold": location_threshold,
@@ -415,6 +417,7 @@ def analyze_genome_occurrences(
             "query": sequence,
             "query_length": len(sequence),
             "total_occurrences": None,
+            "total_possibilities": None,
             "searched_strands": [],
             "locations_listed": False,
             "location_threshold": location_threshold,
@@ -431,8 +434,10 @@ def analyze_genome_occurrences(
     needles = (("+", sequence),) if reverse_sequence == sequence else (("+", sequence), ("-", reverse_sequence))
     stored_hits: list[dict] = []
     total = 0
+    total_possibilities = 0
 
     for contig, bases in _iter_fasta_records(reference.fasta):
+        total_possibilities += max(0, len(bases) - len(sequence) + 1) * len(needles)
         for strand, needle in needles:
             for offset in _find_all(bases, needle):
                 total += 1
@@ -471,6 +476,7 @@ def analyze_genome_occurrences(
         "query": sequence,
         "query_length": len(sequence),
         "total_occurrences": total,
+        "total_possibilities": total_possibilities,
         "searched_strands": [strand for strand, _needle in needles],
         "locations_listed": locations_listed,
         "location_threshold": location_threshold,

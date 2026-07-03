@@ -201,7 +201,7 @@ async function main() {
     await page.click('[data-view="genome"]');
     await page.waitForSelector('#preview table.genome-table', { timeout: 10000 });
     const genomeText = await page.locator('#preview').textContent();
-    if (!genomeText.includes('Human GRCh38') || !genomeText.includes('GENE1')) {
+    if (!genomeText.includes('Human GRCh38') || !genomeText.includes('2 matches out of 34 possibilities') || !genomeText.includes('GENE1')) {
       throw new Error('Genome occurrences were not shown in the preview tab.');
     }
 
