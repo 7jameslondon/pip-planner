@@ -124,21 +124,6 @@ HTML_PAGE = """<!doctype html>
       grid-template-columns: 1fr 1fr;
       gap: 12px;
     }
-    .primary {
-      width: 100%;
-      margin-top: 20px;
-      border: 0;
-      border-radius: 8px;
-      background: var(--green);
-      color: #fff;
-      min-height: 44px;
-      font-weight: 700;
-      cursor: pointer;
-    }
-    .primary:disabled {
-      cursor: wait;
-      opacity: 0.72;
-    }
     .summary {
       display: grid;
       grid-template-columns: repeat(4, minmax(150px, 1fr));
@@ -316,9 +301,11 @@ HTML_PAGE = """<!doctype html>
       text-align: center;
     }
     .loading {
-      display: grid;
-      place-items: center;
-      min-height: 240px;
+      align-items: center;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      min-height: var(--loading-min-height, 240px);
       gap: 12px;
       color: var(--muted);
       font-size: 13px;
@@ -402,8 +389,6 @@ HTML_PAGE = """<!doctype html>
           <option value="human-grch38">Human GRCh38</option>
           <option value="hela">HeLa</option>
         </select>
-
-        <button class="primary" type="submit" id="submit">Update now</button>
       </form>
 
       <div class="message warn" id="warnings"></div>
@@ -436,17 +421,23 @@ HTML_PAGE = """<!doctype html>
   <script>
     const form = document.querySelector('#design-form');
     const sequenceInput = document.querySelector('#sequence');
-    const submit = document.querySelector('#submit');
+    const summary = document.querySelector('.summary');
     const preview = document.querySelector('#preview');
+    const files = document.querySelector('#files');
     const warnings = document.querySelector('#warnings');
     const errors = document.querySelector('#errors');
     const tabs = [...document.querySelectorAll('.tab')];
     let currentResult = null;
     let currentView = 'schematic';
     let designTimer = null;
+    let layoutLockFrame = null;
+    let loadingRevealTimer = null;
+    let pendingLoadingVisible = false;
+    let previousResult = null;
     let activeDesignRequest = 0;
     let lastQueuedPayload = '';
     const productOrder = ['schematic', 'chemical', 'solubility', 'genome', 'model'];
+    const loadingRevealDelayMs = 250;
 
     function payloadFromForm() {
       const data = new FormData(form);
@@ -505,6 +496,93 @@ HTML_PAGE = """<!doctype html>
       return Number.isFinite(count) ? count.toLocaleString() + ' in ' + label : label;
     }
 
+    function productForView(view = currentView) {
+      return productOrder.includes(view) ? view : 'schematic';
+    }
+
+    function isProductSettled(result, product) {
+      const status = result?.productStatus?.[product];
+      return status === 'done' || status === 'error';
+    }
+
+    function hasPendingProducts(result) {
+      return productOrder.some(product => !isProductSettled(result, product));
+    }
+
+    function clearLoadingRevealTimer() {
+      if (loadingRevealTimer) {
+        window.clearTimeout(loadingRevealTimer);
+        loadingRevealTimer = null;
+      }
+    }
+
+    function scheduleLoadingReveal(requestId) {
+      clearLoadingRevealTimer();
+      pendingLoadingVisible = false;
+      loadingRevealTimer = window.setTimeout(() => {
+        loadingRevealTimer = null;
+        if (requestId !== activeDesignRequest || !currentResult || !hasPendingProducts(currentResult)) return;
+        pendingLoadingVisible = true;
+        if (!isProductSettled(currentResult, productForView())) {
+          preserveOutputLayoutForLoading();
+        }
+        renderState();
+      }, loadingRevealDelayMs);
+    }
+
+    function settleLoadingRevealIfComplete() {
+      if (!currentResult || hasPendingProducts(currentResult)) return;
+      clearLoadingRevealTimer();
+      pendingLoadingVisible = false;
+      previousResult = null;
+    }
+
+    function lockElementHeight(element) {
+      const height = Math.ceil(element.getBoundingClientRect().height);
+      if (height <= 0) return;
+      element.style.minHeight = height + 'px';
+      element.dataset.layoutLocked = 'true';
+    }
+
+    function preserveOutputLayoutForLoading() {
+      if (!currentResult || preview.querySelector('.loading')) return;
+      clearOutputLayoutLock();
+      lockElementHeight(summary);
+      lockElementHeight(preview);
+      lockElementHeight(files);
+
+      const previewHeight = Math.ceil(preview.getBoundingClientRect().height);
+      const previewStyles = window.getComputedStyle(preview);
+      const previewFrameHeight =
+        parseFloat(previewStyles.paddingTop) +
+        parseFloat(previewStyles.paddingBottom) +
+        parseFloat(previewStyles.borderTopWidth) +
+        parseFloat(previewStyles.borderBottomWidth);
+      const loadingHeight = Math.max(240, Math.ceil(previewHeight - previewFrameHeight));
+      preview.style.setProperty('--loading-min-height', loadingHeight + 'px');
+    }
+
+    function clearOutputLayoutLock() {
+      if (layoutLockFrame) {
+        window.cancelAnimationFrame(layoutLockFrame);
+        layoutLockFrame = null;
+      }
+      [summary, preview, files].forEach(element => {
+        element.style.minHeight = '';
+        delete element.dataset.layoutLocked;
+      });
+      preview.style.removeProperty('--loading-min-height');
+    }
+
+    function releaseOutputLayoutLockAfterPaint() {
+      if (!summary.dataset.layoutLocked && !preview.dataset.layoutLocked && !files.dataset.layoutLocked) return;
+      if (layoutLockFrame) window.cancelAnimationFrame(layoutLockFrame);
+      layoutLockFrame = window.requestAnimationFrame(() => {
+        layoutLockFrame = null;
+        clearOutputLayoutLock();
+      });
+    }
+
     function resetProductState() {
       currentResult = {
         design: null,
@@ -521,14 +599,8 @@ HTML_PAGE = """<!doctype html>
         schematic_svg: '',
         chemical_svg: ''
       };
-      setMetricLoading('#metric-target');
-      setMetricLoading('#metric-complement');
-      setMetricLoading('#metric-pairs');
-      setMetricLoading('#metric-chain');
-      showMessage(warnings, '');
       showMessage(errors, '');
-      document.querySelector('#files').textContent = '';
-      renderPreview();
+      renderState();
     }
 
     function setProductLoading(product) {
@@ -600,7 +672,7 @@ HTML_PAGE = """<!doctype html>
 
     function renderState() {
       if (!currentResult) return;
-      const design = currentResult.design || {};
+      const design = currentResult.design || (!pendingLoadingVisible && previousResult ? previousResult.design : {}) || {};
       if (design.sequence_label) {
         setMetric('#metric-target', design.sequence_label);
         setMetric('#metric-complement', design.complement_label);
@@ -616,55 +688,63 @@ HTML_PAGE = """<!doctype html>
       showMessage(warnings, Array.isArray(design.warnings) ? design.warnings.join(' ') : '');
       renderFilesText(design);
       renderPreview();
+      settleLoadingRevealIfComplete();
     }
 
     function renderFilesText(design) {
-      const files = design.files || {};
+      const designFiles = design.files || {};
       const pieces = [];
       if (design.chemical_renderer) pieces.push('Generated with ' + design.chemical_renderer);
       if (design.chemical_smiles) pieces.push('SMILES: ' + design.chemical_smiles);
       ['chemical_svg', 'schematic_svg', 'complex_pdb'].forEach(key => {
-        if (files[key]) pieces.push(files[key]);
+        if (designFiles[key]) pieces.push(designFiles[key]);
       });
-      document.querySelector('#files').textContent = pieces.join(' | ');
+      files.textContent = pieces.join(' | ');
     }
 
     function renderPreview() {
       if (!currentResult) return;
-      const download = renderPreviewDownload();
-      if (currentView === 'chemical') {
-        preview.innerHTML = renderProductPreview('chemical', currentResult.chemical_svg, 'Chemical structure') + download;
-      } else if (currentView === 'schematic') {
-        preview.innerHTML = renderProductPreview('schematic', currentResult.schematic_svg, 'Schematic') + download;
-      } else if (currentView === 'solubility') {
-        preview.innerHTML = renderSolubilityPreview();
-      } else if (currentView === 'genome') {
-        preview.innerHTML = renderGenomePreview();
-      } else if (currentView === 'model') {
-        preview.innerHTML = renderModelPreview() + download;
-      } else {
-        preview.innerHTML = '<div class="empty">Unknown output.</div>';
-      }
+      preview.innerHTML = renderView(currentResult);
       tabs.forEach(tab => {
         tab.setAttribute('aria-selected', String(tab.dataset.view === currentView));
       });
+      if (!preview.querySelector('.loading')) {
+        releaseOutputLayoutLockAfterPaint();
+      }
     }
 
-    function renderPreviewDownload() {
+    function renderView(result, allowPendingFallback = true) {
+      if (!result) return '<div class="empty">No design has been generated yet.</div>';
+      const download = renderPreviewDownload(result);
+      if (currentView === 'chemical') {
+        return renderProductPreview(result, 'chemical', result.chemical_svg, 'Chemical structure', allowPendingFallback) + download;
+      } else if (currentView === 'schematic') {
+        return renderProductPreview(result, 'schematic', result.schematic_svg, 'Schematic', allowPendingFallback) + download;
+      } else if (currentView === 'solubility') {
+        return renderSolubilityPreview(result, allowPendingFallback);
+      } else if (currentView === 'genome') {
+        return renderGenomePreview(result, allowPendingFallback);
+      } else if (currentView === 'model') {
+        return renderModelPreview(result, allowPendingFallback) + download;
+      }
+      return '<div class="empty">Unknown output.</div>';
+    }
+
+    function renderPreviewDownload(result = currentResult) {
       const downloads = {
         chemical: {
-          href: currentResult.generated.chemical_svg_url,
-          name: currentResult.generated.chemical_svg_name,
+          href: result.generated.chemical_svg_url,
+          name: result.generated.chemical_svg_name,
           label: 'Download chemical SVG'
         },
         schematic: {
-          href: currentResult.generated.schematic_svg_url,
-          name: currentResult.generated.schematic_svg_name,
+          href: result.generated.schematic_svg_url,
+          name: result.generated.schematic_svg_name,
           label: 'Download schematic SVG'
         },
         model: {
-          href: currentResult.generated.complex_pdb_url,
-          name: currentResult.generated.complex_pdb_name,
+          href: result.generated.complex_pdb_url,
+          name: result.generated.complex_pdb_name,
           label: 'Download PDB'
         }
       };
@@ -672,26 +752,33 @@ HTML_PAGE = """<!doctype html>
       if (!download || !download.href) return '';
       return '<a class="preview-download" href="' + escapeHtml(download.href) + '" download="' +
         escapeHtml(download.name || '') + '" aria-label="' + escapeHtml(download.label) +
-        '" title="' + escapeHtml(download.label) + '"><span aria-hidden="true">↓</span></a>';
+        '" title="' + escapeHtml(download.label) + '"><span aria-hidden="true">&#8595;</span></a>';
     }
 
-    function renderProductPreview(product, markup, label) {
-      const status = currentResult.productStatus[product];
+    function renderPendingPreview(label, allowPendingFallback) {
+      if (allowPendingFallback && !pendingLoadingVisible) {
+        return previousResult ? renderView(previousResult, false) : '<div class="empty">No design has been generated yet.</div>';
+      }
+      return loadingMarkup(label);
+    }
+
+    function renderProductPreview(result, product, markup, label, allowPendingFallback = true) {
+      const status = result.productStatus[product];
       if (status === 'done' && markup) return markup;
-      if (status === 'error') return '<div class="empty">' + escapeHtml(currentResult.productErrors[product] || label + ' failed.') + '</div>';
-      return loadingMarkup(label);
+      if (status === 'error') return '<div class="empty">' + escapeHtml(result.productErrors[product] || label + ' failed.') + '</div>';
+      return renderPendingPreview(label, allowPendingFallback);
     }
 
-    function renderStructuredProductPreview(product, label, renderer) {
-      const status = currentResult.productStatus[product];
-      if (status === 'done') return renderer();
-      if (status === 'error') return '<div class="empty">' + escapeHtml(currentResult.productErrors[product] || label + ' failed.') + '</div>';
-      return loadingMarkup(label);
+    function renderStructuredProductPreview(result, product, label, renderer, allowPendingFallback = true) {
+      const status = result.productStatus[product];
+      if (status === 'done') return renderer(result);
+      if (status === 'error') return '<div class="empty">' + escapeHtml(result.productErrors[product] || label + ' failed.') + '</div>';
+      return renderPendingPreview(label, allowPendingFallback);
     }
 
-    function renderSolubilityPreview() {
-      return renderStructuredProductPreview('solubility', 'Solubility predictions', () => {
-        const predictions = (currentResult.design || {}).solubility_predictions;
+    function renderSolubilityPreview(result = currentResult, allowPendingFallback = true) {
+      return renderStructuredProductPreview(result, 'solubility', 'Solubility predictions', renderResult => {
+        const predictions = (renderResult.design || {}).solubility_predictions;
         if (!Array.isArray(predictions) || predictions.length === 0) {
           return '<div class="empty">No solubility predictions are available.</div>';
         }
@@ -722,12 +809,12 @@ HTML_PAGE = """<!doctype html>
           '<tbody>' + rows + '</tbody>' +
           '</table>' +
           '</div>';
-      });
+      }, allowPendingFallback);
     }
 
-    function renderGenomePreview() {
-      return renderStructuredProductPreview('genome', 'Genome search', () => {
-        const genomeResult = (currentResult.design || {}).genome_occurrences;
+    function renderGenomePreview(result = currentResult, allowPendingFallback = true) {
+      return renderStructuredProductPreview(result, 'genome', 'Genome search', renderResult => {
+        const genomeResult = (renderResult.design || {}).genome_occurrences;
         const heading = '<h2 class="output-heading">Genome search</h2>';
         if (!genomeResult || genomeResult.status === 'skipped') {
           return '<div class="output-panel">' + heading + '<div class="empty">Not searched.</div></div>';
@@ -765,18 +852,18 @@ HTML_PAGE = """<!doctype html>
           '<tbody>' + rows + '</tbody>' +
           '</table>' +
           '</div>';
-      });
+      }, allowPendingFallback);
     }
 
-    function renderModelPreview() {
-      if (currentResult.productStatus.model === 'done' && currentResult.generated.model_html_url) {
+    function renderModelPreview(result = currentResult, allowPendingFallback = true) {
+      if (result.productStatus.model === 'done' && result.generated.model_html_url) {
         return '<iframe class="model-frame" title="3D DNA polyamide model" src="' +
-          escapeHtml(currentResult.generated.model_html_url) + '"></iframe>';
+          escapeHtml(result.generated.model_html_url) + '"></iframe>';
       }
-      if (currentResult.productStatus.model === 'error') {
-        return '<div class="empty">' + escapeHtml(currentResult.productErrors.model || 'The 3D model failed.') + '</div>';
+      if (result.productStatus.model === 'error') {
+        return '<div class="empty">' + escapeHtml(result.productErrors.model || 'The 3D model failed.') + '</div>';
       }
-      return loadingMarkup('Building 3D model');
+      return renderPendingPreview('Building 3D model', allowPendingFallback);
     }
 
     function statusClass(status) {
@@ -827,9 +914,9 @@ HTML_PAGE = """<!doctype html>
       const requestId = queuedRequestId || activeDesignRequest + 1;
       activeDesignRequest = requestId;
       const payload = payloadFromForm();
+      previousResult = currentResult;
+      scheduleLoadingReveal(requestId);
       resetProductState();
-      submit.disabled = true;
-      submit.textContent = 'Updating...';
       showMessage(errors, '');
       try {
         const schematic = await requestProduct('schematic', payload, null);
@@ -853,20 +940,17 @@ HTML_PAGE = """<!doctype html>
         });
         renderState();
         showMessage(errors, error.message);
-      } finally {
-        if (requestId === activeDesignRequest) {
-          submit.disabled = false;
-          submit.textContent = 'Update now';
-        }
       }
     }
 
     tabs.forEach(tab => {
       tab.addEventListener('click', () => {
+        clearOutputLayoutLock();
         currentView = tab.dataset.view;
         renderPreview();
       });
     });
+    window.addEventListener('resize', clearOutputLayoutLock);
     sequenceInput.addEventListener('input', sanitizeSequenceInput);
     form.addEventListener('submit', design);
     form.addEventListener('input', () => scheduleDesign());

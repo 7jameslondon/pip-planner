@@ -79,7 +79,7 @@ Then open:
 http://127.0.0.1:8765/
 ```
 
-The UI updates automatically when the DNA sequence or design options change. It requests generated products separately: the schematic starts first, then the chemical structure, then solubility, genome occurrence search, and the 3D model. Each panel shows a loading state until its own CLI-backed request finishes. The `Update now` button is only a manual refresh.
+The UI updates automatically when the DNA sequence or design options change. It requests generated products separately: the schematic starts first, then the chemical structure, then solubility, genome occurrence search, and the 3D model. Fast updates replace the output directly; slower pending products show a loading state after a short threshold.
 
 Run the native Windows desktop UI:
 
