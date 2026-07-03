@@ -24,6 +24,7 @@ def main() -> int:
 
     env = os.environ.copy()
     env["NODE_PATH"] = _node_path(env.get("NODE_PATH"))
+    env["PIP_PLANNER_GENOME_DIR"] = str(ROOT / "tests" / "fixtures" / "genomes")
     browser = _find_browser_executable()
     if browser is not None:
         env.setdefault("PIP_PLANNER_BROWSER_EXECUTABLE", str(browser))
@@ -45,6 +46,7 @@ def main() -> int:
             str(SERVER_OUT),
         ],
         cwd=ROOT,
+        env=env,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,

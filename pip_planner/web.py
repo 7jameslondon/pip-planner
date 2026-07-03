@@ -166,42 +166,53 @@ HTML_PAGE = """<!doctype html>
       line-height: 1.35;
       white-space: pre-line;
     }
-    .metric.solubility, .metric.genome { grid-column: 1 / -1; }
-    .genome-panel {
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: var(--panel);
-      margin: 0 0 18px;
-      overflow: auto;
-      display: none;
+    .output-panel {
+      max-width: 100%;
     }
-    .genome-panel.is-visible { display: block; }
-    .genome-panel .empty {
-      text-align: left;
-      padding: 14px;
+    .output-heading {
+      font-size: 18px;
+      line-height: 1.25;
+      margin: 0 0 10px;
     }
-    .location-table {
+    .output-summary {
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.45;
+      margin: 0 0 14px;
+    }
+    .output-table {
       width: 100%;
       border-collapse: collapse;
       font-size: 13px;
       min-width: 680px;
     }
-    .location-table th,
-    .location-table td {
+    .output-table th,
+    .output-table td {
       border-bottom: 1px solid var(--line);
       padding: 9px 10px;
       text-align: left;
       vertical-align: top;
     }
-    .location-table th {
+    .output-table th {
       color: var(--muted);
       font-size: 12px;
       font-weight: 700;
       background: #f8fafc;
     }
-    .location-table td.code {
+    .output-table td.code {
       font-family: Consolas, 'Liberation Mono', monospace;
       white-space: nowrap;
+    }
+    .output-table td.status-ok {
+      color: var(--green);
+      font-weight: 700;
+    }
+    .output-table td.status-error {
+      color: var(--danger);
+      font-weight: 700;
+    }
+    .output-table td.status-muted {
+      color: var(--muted);
     }
     .toolbar {
       display: flex;
@@ -405,16 +416,13 @@ HTML_PAGE = """<!doctype html>
         <div class="metric"><span>Complement</span><strong id="metric-complement">-</strong></div>
         <div class="metric"><span>Pairs</span><strong id="metric-pairs">-</strong></div>
         <div class="metric"><span>Chain</span><strong id="metric-chain">-</strong></div>
-        <div class="metric solubility"><span>Solubility</span><strong id="metric-solubility">-</strong></div>
-        <div class="metric genome"><span>Genome occurrences</span><strong id="metric-genome">-</strong></div>
-        <div class="metric genome"><span>3D/MD model</span><strong id="metric-model">-</strong></div>
       </section>
-
-      <section class="genome-panel" id="genome-panel" aria-label="Genome occurrence locations"></section>
 
       <div class="toolbar">
         <button class="tab" type="button" data-view="schematic" aria-selected="true">Schematic</button>
         <button class="tab" type="button" data-view="chemical" aria-selected="false">Chemical structure</button>
+        <button class="tab" type="button" data-view="solubility" aria-selected="false">Solubility</button>
+        <button class="tab" type="button" data-view="genome" aria-selected="false">Genome search</button>
         <button class="tab" type="button" data-view="model" aria-selected="false">3D model</button>
       </div>
 
@@ -430,7 +438,6 @@ HTML_PAGE = """<!doctype html>
     const sequenceInput = document.querySelector('#sequence');
     const submit = document.querySelector('#submit');
     const preview = document.querySelector('#preview');
-    const genomePanel = document.querySelector('#genome-panel');
     const warnings = document.querySelector('#warnings');
     const errors = document.querySelector('#errors');
     const tabs = [...document.querySelectorAll('.tab')];
@@ -489,22 +496,6 @@ HTML_PAGE = """<!doctype html>
       document.querySelector(selector).innerHTML = metricLoadingMarkup();
     }
 
-    function formatSolubility(predictions) {
-      if (!Array.isArray(predictions) || predictions.length === 0) return '-';
-      return predictions.map(prediction => {
-        const method = prediction.method || 'Unknown predictor';
-        if (prediction.status === 'ok' && Number.isFinite(Number(prediction.value))) {
-          const value = Number(prediction.value).toPrecision(3);
-          const unit = prediction.unit || 'predicted logS';
-          const propertyName = prediction.property_name ? ' (' + prediction.property_name + ')' : '';
-          return method + ': ' + value + ' ' + unit + propertyName;
-        }
-        const status = prediction.status || 'unknown';
-        const message = prediction.message ? ' - ' + prediction.message : '';
-        return method + ': ' + status + message;
-      }).join('\\n');
-    }
-
     function formatGenomeOccurrences(genomeResult) {
       if (!genomeResult || genomeResult.status === 'skipped') return 'Not searched';
       if (genomeResult.status === 'missing_reference') return 'Reference missing';
@@ -512,15 +503,6 @@ HTML_PAGE = """<!doctype html>
       const count = Number(genomeResult.total_occurrences);
       const label = genomeResult.genome_label || genomeResult.genome_id || 'Genome';
       return Number.isFinite(count) ? count.toLocaleString() + ' in ' + label : label;
-    }
-
-    function formatModelStatus(modelResult) {
-      if (!modelResult) return 'Not generated';
-      const simulation = modelResult.md_simulation || {};
-      const status = simulation.status || modelResult.status || 'unknown';
-      const atoms = Number(modelResult.atom_count);
-      const countText = Number.isFinite(atoms) ? atoms.toLocaleString() + ' atoms' : 'model generated';
-      return status + ' | ' + countText;
     }
 
     function resetProductState() {
@@ -543,10 +525,6 @@ HTML_PAGE = """<!doctype html>
       setMetricLoading('#metric-complement');
       setMetricLoading('#metric-pairs');
       setMetricLoading('#metric-chain');
-      setMetricLoading('#metric-solubility');
-      setMetricLoading('#metric-genome');
-      setMetricLoading('#metric-model');
-      renderGenomePanel(null);
       showMessage(warnings, '');
       showMessage(errors, '');
       document.querySelector('#files').textContent = '';
@@ -589,42 +567,6 @@ HTML_PAGE = """<!doctype html>
       currentResult.productStatus[product] = 'done';
       delete currentResult.productErrors[product];
       renderState();
-    }
-
-    function renderGenomePanel(genomeResult) {
-      if (!genomeResult || genomeResult.status === 'skipped') {
-        genomePanel.classList.remove('is-visible');
-        genomePanel.innerHTML = '';
-        return;
-      }
-
-      genomePanel.classList.add('is-visible');
-      if (genomeResult.status !== 'ok') {
-        genomePanel.innerHTML = '<div class="empty">' + escapeHtml(genomeResult.message || 'Genome search is unavailable.') + '</div>';
-        return;
-      }
-
-      const locations = Array.isArray(genomeResult.locations) ? genomeResult.locations : [];
-      if (!genomeResult.locations_listed || locations.length === 0) {
-        genomePanel.innerHTML = '<div class="empty">' + escapeHtml(genomeResult.message || 'No locations are listed.') + '</div>';
-        return;
-      }
-
-      const rows = locations.map(location => {
-        return '<tr>' +
-          '<td class="code">' + escapeHtml(location.contig) + '</td>' +
-          '<td class="code">' + escapeHtml(location.start) + '</td>' +
-          '<td class="code">' + escapeHtml(location.end) + '</td>' +
-          '<td class="code">' + escapeHtml(location.strand) + '</td>' +
-          '<td>' + escapeHtml(location.feature_summary || 'No annotation') + '</td>' +
-          '</tr>';
-      }).join('');
-
-      genomePanel.innerHTML =
-        '<table class="location-table">' +
-        '<thead><tr><th>Contig</th><th>Start</th><th>End</th><th>Strand</th><th>Overlapping annotation</th></tr></thead>' +
-        '<tbody>' + rows + '</tbody>' +
-        '</table>';
     }
 
     function escapeHtml(value) {
@@ -671,24 +613,9 @@ HTML_PAGE = """<!doctype html>
         setMetricLoading('#metric-chain');
       }
 
-      renderProductMetric('#metric-solubility', 'solubility', () => formatSolubility(design.solubility_predictions));
-      renderProductMetric('#metric-genome', 'genome', () => formatGenomeOccurrences(design.genome_occurrences));
-      renderProductMetric('#metric-model', 'model', () => formatModelStatus(design.model_3d));
-      renderGenomePanel(currentResult.productStatus.genome === 'done' ? design.genome_occurrences : null);
       showMessage(warnings, Array.isArray(design.warnings) ? design.warnings.join(' ') : '');
       renderFilesText(design);
       renderPreview();
-    }
-
-    function renderProductMetric(selector, product, formatter) {
-      const status = currentResult.productStatus[product];
-      if (status === 'done') {
-        setMetric(selector, formatter());
-      } else if (status === 'error') {
-        setMetric(selector, 'Error');
-      } else {
-        setMetricLoading(selector);
-      }
     }
 
     function renderFilesText(design) {
@@ -709,15 +636,14 @@ HTML_PAGE = """<!doctype html>
         preview.innerHTML = renderProductPreview('chemical', currentResult.chemical_svg, 'Chemical structure') + download;
       } else if (currentView === 'schematic') {
         preview.innerHTML = renderProductPreview('schematic', currentResult.schematic_svg, 'Schematic') + download;
+      } else if (currentView === 'solubility') {
+        preview.innerHTML = renderSolubilityPreview();
+      } else if (currentView === 'genome') {
+        preview.innerHTML = renderGenomePreview();
+      } else if (currentView === 'model') {
+        preview.innerHTML = renderModelPreview() + download;
       } else {
-        if (currentResult.productStatus.model === 'done' && currentResult.generated.model_html_url) {
-          preview.innerHTML = '<iframe class="model-frame" title="3D DNA polyamide model" src="' +
-            escapeHtml(currentResult.generated.model_html_url) + '"></iframe>' + download;
-        } else if (currentResult.productStatus.model === 'error') {
-          preview.innerHTML = '<div class="empty">' + escapeHtml(currentResult.productErrors.model || 'The 3D model failed.') + '</div>';
-        } else {
-          preview.innerHTML = loadingMarkup('Building 3D model');
-        }
+        preview.innerHTML = '<div class="empty">Unknown output.</div>';
       }
       tabs.forEach(tab => {
         tab.setAttribute('aria-selected', String(tab.dataset.view === currentView));
@@ -754,6 +680,109 @@ HTML_PAGE = """<!doctype html>
       if (status === 'done' && markup) return markup;
       if (status === 'error') return '<div class="empty">' + escapeHtml(currentResult.productErrors[product] || label + ' failed.') + '</div>';
       return loadingMarkup(label);
+    }
+
+    function renderStructuredProductPreview(product, label, renderer) {
+      const status = currentResult.productStatus[product];
+      if (status === 'done') return renderer();
+      if (status === 'error') return '<div class="empty">' + escapeHtml(currentResult.productErrors[product] || label + ' failed.') + '</div>';
+      return loadingMarkup(label);
+    }
+
+    function renderSolubilityPreview() {
+      return renderStructuredProductPreview('solubility', 'Solubility predictions', () => {
+        const predictions = (currentResult.design || {}).solubility_predictions;
+        if (!Array.isArray(predictions) || predictions.length === 0) {
+          return '<div class="empty">No solubility predictions are available.</div>';
+        }
+
+        const rows = predictions.map(prediction => {
+          const method = prediction.method || 'Unknown predictor';
+          const status = prediction.status || 'unknown';
+          const numericValue = Number(prediction.value);
+          const value = status === 'ok' && Number.isFinite(numericValue) ? numericValue.toPrecision(3) : '-';
+          const detailParts = [];
+          if (prediction.unit) detailParts.push(prediction.unit);
+          if (prediction.property_name) detailParts.push(prediction.property_name);
+          const detail = detailParts.length ? detailParts.join(' / ') : '-';
+          const message = prediction.message || '-';
+          return '<tr>' +
+            '<td>' + escapeHtml(method) + '</td>' +
+            '<td class="' + statusClass(status) + '">' + escapeHtml(status) + '</td>' +
+            '<td class="code">' + escapeHtml(value) + '</td>' +
+            '<td>' + escapeHtml(detail) + '</td>' +
+            '<td>' + escapeHtml(message) + '</td>' +
+            '</tr>';
+        }).join('');
+
+        return '<div class="output-panel">' +
+          '<h2 class="output-heading">Solubility predictions</h2>' +
+          '<table class="output-table solubility-table">' +
+          '<thead><tr><th>Method</th><th>Status</th><th>Value</th><th>Unit / property</th><th>Message</th></tr></thead>' +
+          '<tbody>' + rows + '</tbody>' +
+          '</table>' +
+          '</div>';
+      });
+    }
+
+    function renderGenomePreview() {
+      return renderStructuredProductPreview('genome', 'Genome search', () => {
+        const genomeResult = (currentResult.design || {}).genome_occurrences;
+        const heading = '<h2 class="output-heading">Genome search</h2>';
+        if (!genomeResult || genomeResult.status === 'skipped') {
+          return '<div class="output-panel">' + heading + '<div class="empty">Not searched.</div></div>';
+        }
+
+        if (genomeResult.status !== 'ok') {
+          return '<div class="output-panel">' + heading + '<div class="empty">' +
+            escapeHtml(genomeResult.message || 'Genome search is unavailable.') +
+            '</div></div>';
+        }
+
+        const summary = '<p class="output-summary">' + escapeHtml(formatGenomeOccurrences(genomeResult)) + '</p>';
+        const locations = Array.isArray(genomeResult.locations) ? genomeResult.locations : [];
+        if (!genomeResult.locations_listed || locations.length === 0) {
+          return '<div class="output-panel">' + heading + summary + '<div class="empty">' +
+            escapeHtml(genomeResult.message || 'No locations are listed.') +
+            '</div></div>';
+        }
+
+        const rows = locations.map(location => {
+          return '<tr>' +
+            '<td class="code">' + escapeHtml(location.contig) + '</td>' +
+            '<td class="code">' + escapeHtml(location.start) + '</td>' +
+            '<td class="code">' + escapeHtml(location.end) + '</td>' +
+            '<td class="code">' + escapeHtml(location.strand) + '</td>' +
+            '<td>' + escapeHtml(location.feature_summary || 'No annotation') + '</td>' +
+            '</tr>';
+        }).join('');
+
+        return '<div class="output-panel">' +
+          heading +
+          summary +
+          '<table class="output-table genome-table">' +
+          '<thead><tr><th>Contig</th><th>Start</th><th>End</th><th>Strand</th><th>Overlapping annotation</th></tr></thead>' +
+          '<tbody>' + rows + '</tbody>' +
+          '</table>' +
+          '</div>';
+      });
+    }
+
+    function renderModelPreview() {
+      if (currentResult.productStatus.model === 'done' && currentResult.generated.model_html_url) {
+        return '<iframe class="model-frame" title="3D DNA polyamide model" src="' +
+          escapeHtml(currentResult.generated.model_html_url) + '"></iframe>';
+      }
+      if (currentResult.productStatus.model === 'error') {
+        return '<div class="empty">' + escapeHtml(currentResult.productErrors.model || 'The 3D model failed.') + '</div>';
+      }
+      return loadingMarkup('Building 3D model');
+    }
+
+    function statusClass(status) {
+      if (status === 'ok') return 'status-ok';
+      if (status === 'error' || status === 'failed') return 'status-error';
+      return 'status-muted';
     }
 
     function scheduleDesign(delay = 250) {

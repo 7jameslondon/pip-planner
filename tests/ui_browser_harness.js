@@ -48,16 +48,25 @@ async function main() {
     await page.locator('label').filter({ hasText: 'Linear' }).click();
     await page.selectOption('#at-mode', 'py-py');
     await page.selectOption('#tail', 'none');
+    await page.selectOption('#genome', 'human-grch38');
     await page.waitForFunction(() => {
       const chain = document.querySelector('#metric-chain');
       return chain && chain.textContent.includes('Py-Py-Im-Py');
     }, null, { timeout: 10000 });
-    await page.waitForFunction(() => {
-      const solubility = document.querySelector('#metric-solubility');
-      return solubility &&
-        solubility.textContent.includes('ADMET-AI v2') &&
-        solubility.textContent.includes('SolTranNet');
-    }, null, { timeout: 10000 });
+
+    await page.click('[data-view="solubility"]');
+    await page.waitForSelector('#preview table.solubility-table', { timeout: 10000 });
+    const solubilityText = await page.locator('#preview').textContent();
+    if (!solubilityText.includes('ADMET-AI v2') || !solubilityText.includes('SolTranNet')) {
+      throw new Error('Solubility predictions were not shown in the preview tab.');
+    }
+
+    await page.click('[data-view="genome"]');
+    await page.waitForSelector('#preview table.genome-table', { timeout: 10000 });
+    const genomeText = await page.locator('#preview').textContent();
+    if (!genomeText.includes('Human GRCh38') || !genomeText.includes('GENE1')) {
+      throw new Error('Genome occurrences were not shown in the preview tab.');
+    }
 
     await page.click('[data-view="chemical"]');
     await page.waitForSelector('#preview .preview-download[aria-label="Download chemical SVG"]', { timeout: 10000 });
